@@ -1,0 +1,1362 @@
+/*
+ * Minimal technical.
+ *
+ * This is simulation software, so the viewport is the interface and everything
+ * else gets out of its way. The plane takes the whole width and most of the
+ * height; configuration lives in a drawer that stays closed until asked for;
+ * analysis lives under a handle at the bottom.
+ *
+ * Restraint is the rule. Space separates things rather than borders, labels are
+ * small and quiet rather than large and letterspaced, and the only saturated
+ * colour on screen belongs to data. Chrome is five greys and one blue.
+ */
+
+:root {
+  --bg: #0d0f12;
+  --surface: #131619;
+  --raised: #191d22;
+  --line: #22262c;
+  --line-strong: #313740;
+
+  --ink: #e6e8ea;
+  --dim: #8b9199;
+  --dimmer: #5c626a;
+
+  --accent: #4a9eff;
+  --go: #3ddc84;
+  --warn: #ffc53d;
+  --stop: #ff5f56;
+
+  --ui:
+    -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
+
+  /*
+   * Type scale — mirrored in src/ui/type.ts, which the canvas and SVG layers
+   * import so all three drawing surfaces share one system.
+   *
+   *   micro    units, axis ticks, keycaps, in-drawing labels
+   *   small    UI labels, table cells, secondary text
+   *   base     body copy, controls, headings
+   *   data     live values and measurements
+   *   display  the largest figure on a surface
+   */
+  --t-micro: 11px;
+  --t-small: 12px;
+  --t-base: 13px;
+  --t-data: 16px;
+  --t-display: 20px;
+
+  /* Line heights are paired to sizes: tight for figures, open for prose. */
+  --lh-tight: 1.15;
+  --lh-snug: 1.4;
+  --lh-ui: 1.5;
+  --lh-prose: 1.6;
+
+  /* Small text gains a little tracking; large figures lose a little. */
+  --tr-micro: 0.01em;
+  --tr-figure: -0.01em;
+
+  --w-regular: 400;
+  --w-medium: 500;
+  --w-semibold: 600;
+
+  --pad: 20px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--ui);
+  font-size: var(--t-base);
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+}
+
+/*
+ * Figures.
+ *
+ * Anything that updates in place or lines up in a column gets tabular numerals,
+ * so digits do not jitter as they change and columns stay square. Prose is left
+ * proportional, where tabular figures would read as stilted.
+ */
+.config-summary dd,
+.stat strong,
+.lane-time,
+.speed output,
+.pin-time,
+.pin-spread,
+.field-head output,
+.sources li::before,
+table.calibration,
+table.measured,
+table.weights,
+input[type='number'] {
+  font-variant-numeric: tabular-nums;
+  /* Belt and braces for stacks that honour the feature but not the property. */
+  font-feature-settings: 'tnum' 1;
+}
+
+/* ---- topbar --------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 var(--pad);
+  height: 46px;
+  flex: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: none;
+}
+
+.brand-name {
+  font-size: var(--t-base);
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.01em;
+}
+
+.brand-sub {
+  font-size: var(--t-small);
+  color: var(--dimmer);
+}
+
+/* Current configuration, stated once and quietly. */
+.config-summary {
+  display: flex;
+  gap: 18px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--t-small);
+  line-height: var(--lh-snug);
+  color: var(--dim);
+}
+
+.config-summary > div {
+  display: flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.config-summary dt {
+  color: var(--dimmer);
+}
+
+.config-summary dd {
+  margin: 0;
+  color: var(--ink);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* ---- viewport ------------------------------------------------------------- */
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  /*
+   * Bounded by the chrome that has to stay reachable — topbar, transport deck
+   * and the analysis handle. Without this the lane grew past the window on a
+   * landscape phone and pushed the play button off screen.
+   */
+  max-height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 8px var(--pad);
+}
+
+/*
+ * An aircraft from above is about 10:1, so it can never fill a wide frame
+ * vertically. Centring it in the space that is left reads as deliberate;
+ * stacking everything at the top and leaving a void underneath does not. Once
+ * the analysis drawer is open the viewport yields, since the panels below it
+ * are then the thing being read.
+ */
+#app.analysis-open .viewport {
+  flex: 0 1 auto;
+  max-height: 44vh;
+}
+
+.lanes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.lanes.racing {
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+}
+
+.lane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.lane-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 2px 6px;
+  font-size: var(--t-small);
+  flex: none;
+}
+
+.lane-name {
+  font-weight: var(--w-medium);
+}
+
+.lane-time {
+  color: var(--dim);
+}
+
+.lane-time.finished::after {
+  content: ' ✓';
+  color: var(--go);
+}
+
+.lane-time.capped {
+  color: var(--warn);
+}
+
+.lane-time.capped::after {
+  content: ' capped';
+}
+
+.canvas-wrap {
+  flex: 1;
+  min-height: 150px;
+  /* The drawing keeps a legible scale and pans when the frame is too narrow. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+
+.canvas-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Live numbers: a quiet status line, not a set of tiles. */
+.readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  padding: 8px 2px 0;
+  flex: none;
+}
+
+.stat {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.stat span {
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-micro);
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.stat strong {
+  font-size: var(--t-data);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tr-figure);
+  white-space: nowrap;
+}
+
+.verdict {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--accent);
+  font-size: var(--t-base);
+  flex: none;
+}
+
+.verdict-caveat {
+  color: var(--dimmer);
+}
+
+/* ---- deck ----------------------------------------------------------------- */
+
+.deck {
+  flex: none;
+  border-top: 1px solid var(--line);
+  padding: 10px var(--pad);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.speed {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 1 190px;
+}
+
+.speed output {
+  color: var(--dim);
+  font-size: var(--t-small);
+  min-width: 30px;
+}
+
+.legend {
+  letter-spacing: var(--tr-micro);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  list-style: none;
+  margin: 0 0 0 auto;
+  padding: 0;
+  font-size: var(--t-micro);
+  color: var(--dim);
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend i {
+  width: 7px;
+  height: 7px;
+  display: block;
+  border-radius: 1px;
+}
+
+.keyhint {
+  margin: 0;
+  display: flex;
+  gap: 4px;
+}
+
+kbd {
+  letter-spacing: var(--tr-micro);
+  font-family: inherit;
+  font-size: var(--t-micro);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--dimmer);
+}
+
+.strategy-note {
+  line-height: var(--lh-prose);
+  margin: 8px 0 0;
+  color: var(--dim);
+  font-size: var(--t-small);
+  max-width: 90ch;
+}
+
+/* ---- controls ------------------------------------------------------------- */
+
+.btn {
+  appearance: none;
+  background: var(--raised);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-size: var(--t-small);
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--dimmer);
+  background: #1f242a;
+}
+
+.btn:disabled {
+  color: var(--dimmer);
+  cursor: default;
+}
+
+.btn-play {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: var(--w-semibold);
+  min-width: 64px;
+}
+
+.btn-play:hover:not(:disabled) {
+  background: #64adff;
+  border-color: #64adff;
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+}
+
+.btn-icon::before {
+  content: '⚙';
+  margin-right: 6px;
+  color: var(--dim);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-small);
+  color: var(--dim);
+  cursor: pointer;
+}
+
+input[type='number'],
+select {
+  appearance: none;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: var(--t-small);
+  padding: 4px 8px;
+}
+
+input[type='number'] {
+  width: 62px;
+}
+
+input[type='range'] {
+  appearance: none;
+  background: var(--line-strong);
+  height: 2px;
+  border-radius: 2px;
+  width: 100%;
+  outline: none;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--ink);
+  cursor: pointer;
+}
+
+input[type='checkbox'] {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--raised);
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+  flex: none;
+}
+
+input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type='checkbox']:checked::after {
+  content: '';
+  width: 3px;
+  height: 7px;
+  border: solid #06121f;
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+
+/* ---- analysis drawer ------------------------------------------------------ */
+
+.drawer-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  padding-right: var(--pad);
+}
+
+/* One control for how hard every panel in the drawer looks. */
+.precision {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.precision[hidden] {
+  display: none;
+}
+
+.precision-label {
+  font-size: var(--t-micro);
+  color: var(--dimmer);
+}
+
+.precision-step {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--dim);
+  font-size: var(--t-micro);
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.precision-step:hover {
+  color: var(--ink);
+}
+
+.precision-step.active {
+  background: var(--raised);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.drawer-handle {
+  appearance: none;
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--dim);
+  font-size: var(--t-small);
+  padding: 9px var(--pad);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+}
+
+.drawer-handle:hover {
+  color: var(--ink);
+}
+
+.drawer-caret {
+  font-size: var(--t-micro);
+  transition: transform 0.12s ease;
+}
+
+.drawer-handle[aria-expanded='true'] .drawer-caret {
+  transform: rotate(180deg);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--pad);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.tabs[hidden],
+.views[hidden] {
+  display: none;
+}
+
+.tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  color: var(--dim);
+  font-size: var(--t-small);
+  padding: 9px 12px;
+  margin-bottom: -1px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab[aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.views {
+  padding: 0 var(--pad);
+}
+
+.view[hidden] {
+  display: none;
+}
+
+.block {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.block:last-child {
+  border-bottom: 0;
+}
+
+.block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.block-bar h2 {
+  margin: 0;
+  font-size: var(--t-base);
+  font-weight: var(--w-semibold);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.rule-tail {
+  display: none;
+}
+
+.bar-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-small);
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.note {
+  line-height: var(--lh-prose);
+  margin: 0 0 12px;
+  color: var(--dim);
+  font-size: var(--t-small);
+  max-width: 82ch;
+}
+
+.note em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+.note strong {
+  color: var(--ink);
+}
+
+.caveat {
+  border-left: 1px solid var(--line-strong);
+  padding-left: 12px;
+  font-size: var(--t-small);
+}
+
+/* ---- inspector ------------------------------------------------------------ */
+
+.inspector {
+  position: fixed;
+  /* Clears the topbar so its own toggle stays reachable. */
+  top: 46px;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  z-index: 20;
+  padding-bottom: 30px;
+}
+
+.inspector[hidden] {
+  display: none;
+}
+
+.inspector-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px var(--pad);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.inspector-head h2 {
+  margin: 0;
+  font-size: var(--t-base);
+  font-weight: var(--w-semibold);
+}
+
+.control-group {
+  padding: 16px var(--pad);
+  border-bottom: 1px solid var(--line);
+}
+
+.control-group h2 {
+  letter-spacing: var(--tr-micro);
+  margin: 0 0 10px;
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  color: var(--dimmer);
+}
+
+.presets,
+.strategy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.preset,
+.strategy {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--dim);
+  font-size: var(--t-small);
+  text-align: left;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.preset:hover,
+.strategy:hover {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+.preset.active,
+.strategy.active {
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.preset-blurb,
+.strategy-blurb {
+  margin: 8px 0 0;
+  font-size: var(--t-small);
+  color: var(--dimmer);
+  line-height: var(--lh-prose);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 14px;
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+.field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: var(--t-small);
+  color: var(--dim);
+}
+
+.field-head output {
+  color: var(--ink);
+}
+
+.field small {
+  color: var(--dimmer);
+  font-size: var(--t-micro);
+  line-height: var(--lh-snug);
+}
+
+.check-field .check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-small);
+  color: var(--dim);
+}
+
+/* ---- charts --------------------------------------------------------------- */
+
+.chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.heatmaps {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.heatmap {
+  margin: 0;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.heatmap-title {
+  font-size: var(--t-small);
+  margin-bottom: 5px;
+}
+
+.bands {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px;
+  margin-top: 14px;
+}
+
+.band-group h4 {
+  margin: 0 0 6px;
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  color: var(--dimmer);
+}
+
+.band {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-small);
+}
+
+.band span {
+  color: var(--dim);
+  flex: 1;
+}
+
+.band strong {
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.band small {
+  color: var(--dimmer);
+  font-size: var(--t-micro);
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+  text-align: right;
+}
+
+/* ---- findings ------------------------------------------------------------- */
+
+.findings-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.finding {
+  border-left: 2px solid var(--line-strong);
+  padding: 9px 0 9px 12px;
+  margin-bottom: 8px;
+}
+
+.finding h3 {
+  margin: 0 0 2px;
+  font-size: var(--t-base);
+  font-weight: var(--w-semibold);
+}
+
+.finding p {
+  line-height: var(--lh-prose);
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t-small);
+  max-width: 90ch;
+}
+
+.finding.verdict,
+.finding.observation {
+  border-left-color: var(--accent);
+}
+
+.finding.lever {
+  border-left-color: var(--go);
+}
+
+.finding.cost {
+  border-left-color: var(--stop);
+}
+
+.finding.advisory {
+  border-left-color: var(--dimmer);
+}
+
+.finding.advisory h3,
+.finding.inconclusive h3 {
+  font-weight: var(--w-medium);
+}
+
+.finding.inconclusive {
+  border-left-color: var(--line);
+}
+
+.finding.inconclusive h3 {
+  color: var(--dim);
+}
+
+/* ---- tables --------------------------------------------------------------- */
+
+table.calibration,
+table.measured,
+table.weights {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-base);
+  margin-bottom: 14px;
+}
+
+table.calibration th {
+  text-align: left;
+  color: var(--dimmer);
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  padding: 0 12px 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+table.calibration td,
+table.measured td,
+table.weights td {
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+table.calibration th:not(:first-child),
+table.calibration td:not(:first-child),
+table.measured td:last-child {
+  text-align: right;
+}
+
+table.calibration td.ok {
+  color: var(--go);
+}
+
+table.calibration td.off {
+  color: var(--warn);
+}
+
+table.weights {
+  max-width: 400px;
+}
+
+table.weights td:first-child {
+  color: var(--dim);
+  width: 66px;
+}
+
+table.weights td:last-child {
+  text-align: right;
+  width: 52px;
+}
+
+.weight-cell {
+  width: 100%;
+  background: var(--raised);
+  line-height: 0;
+  border-radius: 2px;
+}
+
+.weight-bar {
+  display: inline-block;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.weight-bar.neg {
+  background: var(--accent);
+}
+
+.weight-bar.pos {
+  background: var(--warn);
+}
+
+/* ---- optimizer ------------------------------------------------------------ */
+
+.verdict-inline {
+  margin: 2px 0 12px;
+  font-size: var(--t-base);
+}
+
+.policy-facts {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) 1fr;
+  gap: 6px 16px;
+  margin: 0 0 14px;
+  font-size: var(--t-base);
+}
+
+.policy-facts dt {
+  color: var(--dimmer);
+}
+
+.policy-facts dd {
+  margin: 0;
+}
+
+.opt-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: var(--t-small);
+  color: var(--dimmer);
+}
+
+/* ---- bench ---------------------------------------------------------------- */
+
+.pin-hint {
+  margin: 0;
+  font-size: var(--t-small);
+  color: var(--dimmer);
+}
+
+.pin-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.pin {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  border-left: 2px solid transparent;
+}
+
+.pin.selected {
+  border-left-color: var(--accent);
+  background: var(--surface);
+}
+
+.pin-pick {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px 16px;
+  padding: 10px 0 10px 12px;
+  cursor: pointer;
+}
+
+.pin-pick:hover .pin-label {
+  color: var(--accent);
+}
+
+.pin-label {
+  font-size: var(--t-base);
+}
+
+.pin-time {
+  font-size: var(--t-display);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tr-figure);
+  grid-row: 1 / 3;
+  grid-column: 2;
+  align-self: center;
+}
+
+.pin-spread {
+  font-size: var(--t-micro);
+  color: var(--dimmer);
+}
+
+.pin-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pin-verdict {
+  margin-top: 0;
+}
+
+.pin-verdict-null {
+  border-left-color: var(--line-strong);
+  color: var(--dim);
+}
+
+/* ---- sources -------------------------------------------------------------- */
+
+.research-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 28px;
+  margin-bottom: 18px;
+}
+
+.research h3 {
+  letter-spacing: var(--tr-micro);
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  color: var(--dimmer);
+  margin: 0 0 8px;
+}
+
+table.measured td:last-child {
+  color: var(--dim);
+}
+
+.constants {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--dim);
+  font-size: var(--t-base);
+}
+
+.constants li {
+  margin-bottom: 5px;
+}
+
+.constants strong {
+  color: var(--ink);
+}
+
+.sources {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: src;
+}
+
+.sources li {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0 10px 28px;
+  position: relative;
+  font-size: var(--t-small);
+  color: var(--dim);
+}
+
+.sources li::before {
+  counter-increment: src;
+  content: counter(src, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 10px;
+  font-size: var(--t-micro);
+  color: var(--dimmer);
+}
+
+.sources a {
+  color: var(--ink);
+  text-decoration: none;
+  display: block;
+}
+
+.sources a:hover {
+  color: var(--accent);
+}
+
+.footnote {
+  color: var(--warn);
+  cursor: help;
+}
+
+.footnote-body {
+  font-size: var(--t-small);
+}
+
+::selection {
+  background: rgba(74, 158, 255, 0.3);
+}
+
+/* ---- responsive ------------------------------------------------------------
+ *
+ * Two breakpoints, used consistently:
+ *   compact  <= 900px   tablet portrait and below — secondary chrome sheds
+ *   narrow   <= 620px   phone — the topbar keeps only what it must
+ */
+
+/* Short windows — landscape phones especially — need the chrome to win. */
+@media (max-height: 560px) {
+  .viewport {
+    max-height: calc(100vh - 150px);
+  }
+
+  .strategy-note {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --pad: 14px;
+  }
+
+  /* The legend is a reference, not a control; the drawing survives without it. */
+  .legend {
+    display: none;
+  }
+
+  .heatmaps {
+    flex-direction: column;
+  }
+
+  .research-body {
+    gap: 18px;
+  }
+
+  /* Wide tables get their own scroll rather than pushing the page sideways. */
+  .views table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 620px) {
+  .topbar {
+    height: auto;
+    padding: 8px var(--pad);
+    gap: 10px;
+  }
+
+  /* Config is readable in the inspector; the topbar keeps brand and actions. */
+  .config-summary,
+  .brand-sub,
+  .keyhint {
+    display: none;
+  }
+
+  /* Race needs an opponent picker beside it, which is two controls too many
+     for this width. Both live in the inspector instead. */
+  .topbar .toggle,
+  .topbar select {
+    display: none;
+  }
+
+  .topbar-actions {
+    margin-left: auto;
+  }
+
+  .inspector {
+    width: 100%;
+    top: 0;
+  }
+
+  .readout {
+    gap: 14px;
+  }
+
+  .transport {
+    gap: 10px;
+  }
+
+  .speed {
+    flex: 1 1 100%;
+    order: 1;
+  }
+}
+
+/* Fingers need more than a 5px pad. */
+@media (pointer: coarse) {
+  .btn {
+    padding: 9px 14px;
+  }
+
+  .tab {
+    padding: 12px 14px;
+  }
+
+  .preset,
+  .strategy {
+    padding: 9px 10px;
+  }
+
+  input[type='range']::-webkit-slider-thumb {
+    width: 18px;
+    height: 18px;
+  }
+
+  input[type='checkbox'] {
+    width: 17px;
+    height: 17px;
+  }
+
+  .keyhint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

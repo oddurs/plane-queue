@@ -1,0 +1,815 @@
+import { maxDepth } from '../engine/cabin.ts';
+import { TYPE, WEIGHT, canvasFont } from '../ui/type.ts';
+import type { AgentState, Cabin, Seat } from '../engine/types.ts';
+import type { SimSnapshot } from '../engine/sim.ts';
+
+/**
+ * Top-down view of the cabin, drawn as an aircraft rather than a spreadsheet.
+ *
+ * Nose left, tail right, so boarding runs left to right — the same direction as
+ * the aisle index in the simulation. The layout follows a real narrow-body:
+ * a galley and lavatory ahead of row 1, overwing exits with visibly greater
+ * pitch partway down, the wing box behind the cabin, and an aft galley with a
+ * pair of lavatories behind the last row.
+ *
+ * Passenger state is colour-coded so the two interference types the literature
+ * cares about are visible as they happen: amber for someone stowing luggage,
+ * red for a row shuffling to let a passenger past.
+ */
+
+/** Flat, unlit and high-contrast — a technical drawing, not a rendering. */
+/**
+ * A technical drawing: thin lines, neutral greys, and saturation reserved for
+ * passenger state so the eye goes to what is happening rather than to the
+ * aircraft it is happening in.
+ */
+const COLORS = {
+  fuselage: '#0d0f12',
+  hull: '#4a5560',
+  hullSoft: '#2a3038',
+  wing: '#14181d',
+  wingEdge: '#252b32',
+  seatEmpty: '#171b20',
+  seatEdge: '#252b32',
+  seatBack: '#1e232a',
+  seatTaken: '#24483a',
+  seatTakenBack: '#1c3a2f',
+  firstClass: '#1b222b',
+  aisle: '#111418',
+  service: '#141821',
+  serviceHatch: '#1d232c',
+  exit: '#ffc53d',
+  bag: '#6f6350',
+  head: '#e6e8ea',
+  binEmpty: '#161a1f',
+  binUsed: '#5c5847',
+  binFull: '#ffc53d',
+  walking: '#4a9eff',
+  stowing: '#ffc53d',
+  shuffling: '#ff5f56',
+  blocked: '#6b7280',
+  text: '#5c626a',
+  textBright: '#e6e8ea',
+} as const;
+
+/** Categorical series palette, saturated enough to hold up on near-black. */
+const GROUP_COLORS = [
+  '#4a9eff',
+  '#3ddc84',
+  '#ffc53d',
+  '#ff8f4a',
+  '#b98cff',
+  '#2dd4bf',
+  '#ff6f91',
+  '#a3e635',
+];
+
+/**
+ * The smallest drawing scale worth showing, in pixels per metre.
+ *
+ * Below roughly this, a 0.43 m seat is under 7px and the cabin stops being
+ * readable — on a phone the aircraft was rendering at 3.4px per seat. Rather
+ * than shrink past legibility the canvas keeps this scale and grows wider than
+ * its frame, so a narrow screen pans across the drawing the way you would pan
+ * across a blueprint.
+ */
+const MIN_SCALE = 16;
+
+/** Whether the viewer has asked for less motion. Read once; it rarely changes. */
+const REDUCED_MOTION =
+  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const FIXTURE_LABEL: Record<string, string> = {
+  galley: 'G',
+  lavatory: 'L',
+  attendant: 'A',
+  closet: 'C',
+  stowage: 'S',
+};
+
+export interface Layout {
+  /** Left edge and width of each seat row, indexed [row - 1]. */
+  rowX: number[];
+  rowW: number[];
+  seatH: number;
+  gap: number;
+  originY: number;
+  /** Top of the upper seat band, inboard of the sidewall trim. */
+  seatTopY: number;
+  aisleY: number;
+  cabinH: number;
+  /** Seat field extents. */
+  cabinX0: number;
+  cabinX1: number;
+  fwdX0: number;
+  aftX1: number;
+  noseX: number;
+  tailX: number;
+  top: number;
+  bottom: number;
+  /** Half-span of the wings, measured out from the fuselage edge. */
+  wingSpan: number;
+  /** Canvas pixels per metre. */
+  scale: number;
+  /** Baseline of the jetbridge queue lane. */
+  queueY: number;
+}
+
+/**
+ * Fits the aircraft to the canvas, working in metres throughout.
+ *
+ * Everything is scaled from the published geometry, so the fuselage carries its
+ * real length-to-width ratio, exit rows are as much wider as their extra pitch
+ * makes them, and doors land at their documented stations rather than wherever
+ * looked right.
+ */
+/** Length of the drawn aircraft in metres, cabin included. */
+function drawnLengthM(cabin: Cabin): number {
+  const t = cabin.type;
+  const cabinM = cabin.rowPitchM.reduce((sum, p) => sum + p, 0);
+  return t.noseM + t.forwardService.lengthM + cabinM + t.aftService.lengthM + t.tailM;
+}
+
+/** Canvas width needed to draw this cabin at the minimum legible scale. */
+export function requiredWidth(cabin: Cabin): number {
+  return Math.ceil(drawnLengthM(cabin) * MIN_SCALE + 24);
+}
+
+function layout(cabin: Cabin, width: number, height: number): Layout {
+  const t = cabin.type;
+  const rows = cabin.config.rows;
+  const margin = 12;
+
+  const totalM = drawnLengthM(cabin);
+
+  const byWidth = (width - margin * 2) / totalM;
+  // Keep the true beam: the cabin band must also fit the height available.
+  const byHeight = (height - 104) / t.cabinWidthM;
+  const scale = Math.min(byWidth, byHeight);
+
+  // Cross section, to scale: sidewall clearance, three seats, the aisle, three
+  // seats, sidewall clearance. On the A320 that is 0.43 m seats and a 0.64 m
+  // aisle inside a 3.63 m cabin, leaving ~0.20 m of trim each side.
+  const cabinH = t.cabinWidthM * scale;
+  const seatH = t.seatWidthM * scale;
+  const gap = t.aisleWidthM * scale;
+  const sidewall = Math.max(0, (cabinH - seatH * 6 - gap) / 2);
+  const originY = Math.max(26, (height - cabinH) / 2 - 14);
+  const seatTopY = originY + sidewall;
+
+  const noseX = margin;
+  const fwdX0 = noseX + t.noseM * scale;
+  const cabinX0 = fwdX0 + t.forwardService.lengthM * scale;
+
+  const rowX: number[] = [];
+  const rowW: number[] = [];
+  let x = cabinX0;
+  for (let i = 0; i < rows; i++) {
+    const w = (cabin.rowPitchM[i] ?? t.pitchEconomyM) * scale;
+    rowX.push(x);
+    rowW.push(w);
+    x += w;
+  }
+
+  const cabinX1 = x;
+  const aftX1 = cabinX1 + t.aftService.lengthM * scale;
+  const tailX = aftX1 + t.tailM * scale;
+
+  const top = originY;
+  const bottom = originY + cabinH;
+  // Wings must fit the canvas: never reach past the top edge, and always leave
+  // room beneath for the row numbers and the jetbridge lane.
+  const wingSpan = Math.max(18, Math.min(54, top - 16, height - bottom - 46));
+
+  return {
+    rowX,
+    rowW,
+    seatH,
+    gap,
+    originY,
+    seatTopY,
+    aisleY: seatTopY + seatH * 3 + gap / 2,
+    cabinH,
+    cabinX0,
+    cabinX1,
+    fwdX0,
+    aftX1,
+    noseX,
+    tailX,
+    top,
+    bottom,
+    wingSpan,
+    scale,
+    // Anchored to the aircraft, not the canvas floor. Pinned to the bottom of a
+    // tall frame it drifted away from the thing it belongs to.
+    // Clear of the row numbers, which sit at bottom + wingSpan + 12.
+    queueY: Math.min(height - 6, bottom + wingSpan + 64),
+  };
+}
+
+/**
+ * Vertical slot for a seat, 0-2 above the aisle and 3-5 below.
+ * Left-side seats sit above the aisle, right-side below, both ordered so that
+ * window seats are at the outside of the fuselage.
+ */
+function seatSlot(seat: Seat, maxDepth: number): number {
+  // Slots run outboard-to-inboard. Scaling by the row's own maximum depth keeps
+  // the window seat against the fuselage in a 2-2 row, leaving the *middle*
+  // slot empty — which is what a two-abreast cabin actually looks like.
+  const outboard = maxDepth <= 0 ? 0 : (2 * (maxDepth - seat.depth)) / maxDepth;
+  return seat.side === 'left' ? outboard : 5 - outboard;
+}
+
+function seatRect(l: Layout, seat: Seat, maxDepth: number): [number, number, number, number] {
+  const x = l.rowX[seat.row - 1] ?? 0;
+  const w = l.rowW[seat.row - 1] ?? 0;
+  const slot = seatSlot(seat, maxDepth);
+  const y = l.seatTopY + slot * l.seatH + (slot >= 3 ? l.gap : 0);
+  return [x + 1.5, y + 1, w - 3, l.seatH - 2];
+}
+
+/** Centre of an aisle cell. Cell 0 is the doorway, just ahead of row 1. */
+function aisleX(l: Layout, pos: number): number {
+  if (pos <= 0) return l.cabinX0 - (l.rowW[0] ?? 10) * 0.5;
+  const i = Math.min(pos, l.rowX.length) - 1;
+  return (l.rowX[i] ?? l.cabinX1) + (l.rowW[i] ?? 10) / 2;
+}
+
+export class CabinRenderer {
+  private ctx: CanvasRenderingContext2D;
+
+  constructor(private canvas: HTMLCanvasElement) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    this.ctx = ctx;
+  }
+
+  /**
+   * Sizes the backing store to the element's CSS box at device resolution.
+   *
+   * The canvas takes whichever is larger of its frame and the width the cabin
+   * needs to stay legible; when that exceeds the frame the wrapper scrolls.
+   */
+  resize(cabin: Cabin): void {
+    const frame = this.canvas.parentElement?.clientWidth ?? 0;
+    const width = Math.max(frame, requiredWidth(cabin));
+    this.canvas.style.width = `${width}px`;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  draw(
+    cabin: Cabin,
+    snapshot: SimSnapshot,
+    occupied: ReadonlySet<string>,
+    binSlots: readonly number[] = [],
+  ): void {
+    const { ctx } = this;
+    const rect = this.canvas.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    const l = layout(cabin, w, h);
+
+    ctx.fillStyle = COLORS.fuselage;
+    ctx.fillRect(0, 0, w, h);
+
+    this.drawWings(l, cabin);
+    this.drawHull(l);
+    this.drawService(l, cabin);
+    this.drawBins(l, cabin, binSlots);
+    this.drawAisle(l, cabin);
+    this.drawSeats(l, cabin, occupied);
+    this.drawSeated(l, cabin, occupied);
+    this.drawExits(l, cabin);
+    this.drawRowNumbers(l, cabin);
+    this.drawAgents(l, cabin, snapshot);
+    this.drawDoors(l, cabin);
+    this.drawScale(l, cabin);
+    this.drawQueue(l, cabin, snapshot);
+  }
+
+  /**
+   * Wing root box and a swept stub.
+   *
+   * The real span is 34.1 m against a 3.63 m cabin, so a full planform at this
+   * scale would be several times taller than the frame. The wing is drawn as
+   * far as the box allows and deliberately runs off the edge rather than being
+   * shrunk into a shape the aircraft does not have.
+   */
+  private drawWings(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const [from, to] = cabin.features.wingRows;
+    const x0 = l.rowX[from - 1] ?? l.cabinX0;
+    const x1 = (l.rowX[to - 1] ?? l.cabinX1) + (l.rowW[to - 1] ?? 0);
+    const span = l.wingSpan;
+    const chord = x1 - x0;
+
+    ctx.strokeStyle = COLORS.wingEdge;
+    ctx.lineWidth = 1;
+
+    for (const dir of [-1, 1]) {
+      const rootY = dir < 0 ? l.top + 2 : l.bottom - 2;
+      const tipY = rootY + dir * span;
+      ctx.fillStyle = COLORS.wing;
+      ctx.beginPath();
+      ctx.moveTo(x0, rootY);
+      ctx.lineTo(x1, rootY);
+      // Sweep the leading edge back as the wing runs outboard.
+      ctx.lineTo(x0 + chord * 0.78, tipY);
+      ctx.lineTo(x0 + chord * 0.34, tipY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Engine nacelle, slung under the leading edge partway out the span.
+      const nacelleY = rootY + dir * span * 0.5;
+      ctx.fillStyle = COLORS.wingEdge;
+      ctx.fillRect(x0 + chord * 0.02, nacelleY - span * 0.11, chord * 0.24, span * 0.22);
+    }
+
+    // Tailplane, at its own published span relative to the wing.
+    const ratio = cabin.type.tailplaneSpanM / cabin.type.wingspanM;
+    const tx0 = l.cabinX1 + (l.aftX1 - l.cabinX1) * 0.5;
+    const tChord = Math.max(12, l.tailX - 10 - tx0);
+    const tSpan = span * ratio * 1.6;
+    for (const dir of [-1, 1]) {
+      const rootY = dir < 0 ? l.top + 4 : l.bottom - 4;
+      ctx.fillStyle = COLORS.wing;
+      ctx.beginPath();
+      ctx.moveTo(tx0, rootY);
+      ctx.lineTo(tx0 + tChord, rootY);
+      ctx.lineTo(tx0 + tChord * 0.72, rootY + dir * tSpan);
+      ctx.lineTo(tx0 + tChord * 0.3, rootY + dir * tSpan);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  /** The fuselage outline: pointed nose, straight barrel, tapered tail. */
+  private drawHull(l: Layout): void {
+    const { ctx } = this;
+    const midY = (l.top + l.bottom) / 2;
+
+    ctx.beginPath();
+    ctx.moveTo(l.fwdX0, l.top);
+    ctx.lineTo(l.aftX1, l.top);
+    // Tail cone.
+    ctx.quadraticCurveTo(l.tailX, l.top + 2, l.tailX, midY - 4);
+    ctx.lineTo(l.tailX, midY + 4);
+    ctx.quadraticCurveTo(l.tailX, l.bottom - 2, l.aftX1, l.bottom);
+    ctx.lineTo(l.fwdX0, l.bottom);
+    // Nose cone.
+    ctx.quadraticCurveTo(l.noseX, l.bottom, l.noseX, midY);
+    ctx.quadraticCurveTo(l.noseX, l.top, l.fwdX0, l.top);
+    ctx.closePath();
+
+    ctx.fillStyle = COLORS.fuselage;
+    ctx.fill();
+    ctx.strokeStyle = COLORS.hull;
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+
+    // Flight-deck bulkhead.
+    ctx.strokeStyle = COLORS.hullSoft;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(l.fwdX0, l.top + 2);
+    ctx.lineTo(l.fwdX0, l.bottom - 2);
+    ctx.stroke();
+  }
+
+  /**
+   * Galleys, lavatories, closets and attendant seats, drawn where the plan view
+   * puts them.
+   *
+   * The real arrangement is asymmetric — a galley on one side of the forward
+   * vestibule and a lavatory on the other — which a single hatched block hides.
+   * Labels follow the manufacturer's legend: G galley, L lavatory, A attendant,
+   * C closet, S stowage.
+   */
+  private drawService(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const zones: [number, number, typeof cabin.type.forwardService][] = [
+      [l.fwdX0, l.cabinX0, cabin.type.forwardService],
+      [l.cabinX1, l.aftX1, cabin.type.aftService],
+    ];
+
+    for (const [x0, x1, zone] of zones) {
+      ctx.fillStyle = COLORS.service;
+      ctx.fillRect(x0, l.top, x1 - x0, l.bottom - l.top);
+
+      const bySide = { left: 0, right: 0 };
+      for (const f of zone.fixtures) bySide[f.side]++;
+
+      for (const side of ['left', 'right'] as const) {
+        const items = zone.fixtures
+          .filter((f) => f.side === side)
+          .sort((a, b) => a.order - b.order);
+        if (items.length === 0) continue;
+
+        const bandY = side === 'left' ? l.top : l.aisleY + l.gap / 2;
+        const bandH =
+          side === 'left' ? l.aisleY - l.gap / 2 - l.top : l.bottom - (l.aisleY + l.gap / 2);
+        const w = (x1 - x0) / items.length;
+
+        items.forEach((fixture, i) => {
+          const fx = x0 + i * w;
+          ctx.fillStyle = fixture.kind === 'attendant' ? COLORS.aisle : COLORS.serviceHatch;
+          ctx.fillRect(fx + 1, bandY + 1, w - 2, bandH - 2);
+          ctx.strokeStyle = COLORS.hullSoft;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(fx + 1.5, bandY + 1.5, w - 3, bandH - 3);
+
+          if (w > 12 && bandH > 12) {
+            ctx.fillStyle = COLORS.text;
+            ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
+            ctx.textAlign = 'center';
+            ctx.fillText(
+              FIXTURE_LABEL[fixture.kind] ?? '?',
+              fx + w / 2,
+              bandY + bandH / 2 + 3,
+            );
+          }
+        });
+      }
+      void bySide;
+    }
+  }
+
+  /**
+   * Overhead stowage, drawn as a bin strip outboard of each seat band and
+   * filling as bags go in.
+   *
+   * Bin capacity drives a real part of the simulation — late boarders hunt for
+   * space and hold up the aisle doing it — and none of that was visible.
+   */
+  private drawBins(l: Layout, cabin: Cabin, remaining: readonly number[]): void {
+    const { ctx } = this;
+    const capacity = cabin.config.binSlotsPerRow;
+    if (capacity <= 0) return;
+    const h = Math.max(2.5, Math.min(6, l.seatH * 0.3));
+
+    for (let row = 1; row <= cabin.config.rows; row++) {
+      const x = l.rowX[row - 1];
+      const w = l.rowW[row - 1];
+      if (x === undefined || w === undefined) continue;
+
+      const left = remaining[row] ?? capacity;
+      const used = Math.max(0, Math.min(1, (capacity - left) / capacity));
+
+      for (const y of [l.top - h - 1.5, l.bottom + 1.5]) {
+        ctx.fillStyle = COLORS.binEmpty;
+        ctx.fillRect(x + 1, y, w - 2, h);
+        if (used > 0) {
+          // Amber through to red as the bin runs out.
+          ctx.fillStyle = used >= 0.999 ? COLORS.binFull : COLORS.binUsed;
+          ctx.fillRect(x + 1, y, (w - 2) * used, h);
+        }
+      }
+    }
+  }
+
+  private drawAisle(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    ctx.fillStyle = COLORS.aisle;
+    ctx.fillRect(l.fwdX0, l.aisleY - l.gap / 2, l.aftX1 - l.fwdX0, l.gap);
+    ctx.strokeStyle = COLORS.serviceHatch;
+    ctx.lineWidth = 1;
+    for (const dy of [-l.gap / 2, l.gap / 2]) {
+      ctx.beginPath();
+      ctx.moveTo(l.cabinX0, l.aisleY + dy);
+      ctx.lineTo(l.cabinX1, l.aisleY + dy);
+      ctx.stroke();
+    }
+    void cabin;
+  }
+
+  private drawSeats(l: Layout, cabin: Cabin, occupied: ReadonlySet<string>): void {
+    const { ctx } = this;
+
+    for (const seat of cabin.seats) {
+      const [x, y, w, h] = seatRect(l, seat, maxDepth(cabin, seat.row));
+      const taken = occupied.has(`${seat.row}:${seat.letter}`);
+
+      ctx.fillStyle = taken
+        ? COLORS.seatTaken
+        : seat.cabinClass === 'first'
+          ? COLORS.firstClass
+          : COLORS.seatEmpty;
+      ctx.fillRect(x, y, w, h);
+
+      // A seat back on the forward edge, so seats read as seats.
+      if (w > 7) {
+        ctx.fillStyle = taken ? COLORS.seatTakenBack : COLORS.seatBack;
+        ctx.fillRect(x, y, Math.max(2, w * 0.22), h);
+      }
+
+      ctx.strokeStyle = COLORS.seatEdge;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    }
+  }
+
+  /** Overwing exits: a gap in the hull plus a marker on each side. */
+  private drawExits(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    for (const row of cabin.features.exitRows) {
+      const x = l.rowX[row - 1];
+      const w = l.rowW[row - 1];
+      if (x === undefined || w === undefined) continue;
+
+      ctx.strokeStyle = COLORS.exit;
+      ctx.lineWidth = 3;
+      for (const y of [l.top, l.bottom]) {
+        ctx.beginPath();
+        ctx.moveTo(x + w * 0.2, y);
+        ctx.lineTo(x + w * 0.8, y);
+        ctx.stroke();
+      }
+    }
+
+    if (cabin.features.exitRows.length === 0) return;
+    const first = cabin.features.exitRows[0] as number;
+    const fx = l.rowX[first - 1];
+    if (fx === undefined) return;
+    ctx.fillStyle = COLORS.exit;
+    ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
+    ctx.textAlign = 'left';
+    ctx.fillText('exit', fx, l.top - 6);
+  }
+
+  private drawRowNumbers(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const step = (l.rowW[0] ?? 0) >= 15 ? 1 : (l.rowW[0] ?? 0) >= 9 ? 2 : 5;
+    ctx.fillStyle = COLORS.text;
+    ctx.font = canvasFont(TYPE.micro);
+    ctx.textAlign = 'center';
+    for (let row = 1; row <= cabin.config.rows; row++) {
+      if (row % step !== 0 && row !== 1) continue;
+      const x = (l.rowX[row - 1] ?? 0) + (l.rowW[row - 1] ?? 0) / 2;
+      ctx.fillText(String(row), x, l.bottom + l.wingSpan + 12);
+    }
+  }
+
+  /**
+   * Passengers, drawn as figures rather than dots.
+   *
+   * Everything here is presentation. Position is interpolated between the aisle
+   * cells the simulation actually uses, and the gait phase is a pure function of
+   * passenger id and simulated time — no engine state is read that is not
+   * already fixed, and none is written. The model is a one-per-cell queue, so
+   * nobody is ever drawn overtaking anybody: that would be depicting mechanics
+   * the simulation does not have.
+   */
+  private drawAgents(l: Layout, cabin: Cabin, snapshot: SimSnapshot): void {
+    const { ctx } = this;
+    const r = Math.max(2.2, Math.min(l.rowW[0] ?? 10, l.gap) * 0.3);
+
+    for (const agent of snapshot.agents) {
+      if (agent.pos < 0) continue;
+
+      const target = aisleX(l, agent.pos);
+      let x = target;
+      if (agent.state === 'walking' && agent.stepDuration > 0 && agent.fromPos >= 0) {
+        const from = aisleX(l, agent.fromPos);
+        const progress = Math.min(1, Math.max(0, 1 - agent.timer / agent.stepDuration));
+        x = from + (target - from) * progress;
+      }
+
+      const seat = agent.passenger.seat;
+      const [sx, sy, sw, sh] = seatRect(l, seat, maxDepth(cabin, seat.row));
+      const seatCentreY = sy + sh / 2;
+
+      // Stepping out of the aisle into the row: slide toward the seat as the
+      // shuffle completes, so sitting down reads as a movement.
+      let y = l.aisleY;
+      if (agent.state === 'shuffling' && agent.stepDuration >= 0) {
+        const total = Math.max(0.001, agent.timer + 0.001);
+        const settle = Math.min(1, Math.max(0, 1 - total / 4));
+        y = l.aisleY + (seatCentreY - l.aisleY) * settle * 0.55;
+        x = x + (sx + sw / 2 - x) * settle * 0.55;
+      }
+
+      // A gait bob, phase-locked to the passenger and the clock. Deterministic,
+      // and read-only with respect to the simulation.
+      if (agent.state === 'walking' && !agent.blocked && !REDUCED_MOTION) {
+        const phase = agent.passenger.id * 1.7 + snapshot.time * 5.5;
+        y += Math.sin(phase) * r * 0.22;
+      }
+
+      const color = this.agentColor(agent);
+      // Facing aft while walking, facing the seat once turning in.
+      const facing = agent.state === 'walking' ? 1 : Math.sign(seatCentreY - l.aisleY) || 1;
+      this.drawFigure(x, y, r, color, agent, facing);
+
+      if (agent.state !== 'seated') {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.4;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(sx + 0.5, sy + 0.5, sw - 1, sh - 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  /** A shoulders-and-head figure, with a bag while one is still being carried. */
+  private drawFigure(
+    x: number,
+    y: number,
+    r: number,
+    color: string,
+    agent: AgentState,
+    facing: number,
+  ): void {
+    const { ctx } = this;
+
+    // Carried luggage, dropped once the bag is in the bin.
+    if (agent.passenger.bags > 0 && agent.state !== 'seated' && r > 3) {
+      ctx.fillStyle = COLORS.bag;
+      const bw = r * 0.85;
+      ctx.fillRect(x - r * 1.15, y - bw / 2, bw, bw);
+    }
+
+    // Shoulders.
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(x, y, r * 0.78, r, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Head, offset the way the passenger is facing.
+    ctx.fillStyle = COLORS.head;
+    ctx.beginPath();
+    ctx.arc(x + facing * r * 0.18, y, r * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Arms raised into the bin while stowing; a halo still marks the stall.
+    if (agent.state === 'stowing' || agent.state === 'shuffling') {
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3.5, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /** Seated passengers, so a filled cabin reads as people rather than blocks. */
+  private drawSeated(l: Layout, cabin: Cabin, occupied: ReadonlySet<string>): void {
+    const { ctx } = this;
+    for (const seat of cabin.seats) {
+      if (!occupied.has(`${seat.row}:${seat.letter}`)) continue;
+      const [x, y, w, h] = seatRect(l, seat, maxDepth(cabin, seat.row));
+      if (w < 6 || h < 6) continue;
+      ctx.fillStyle = COLORS.head;
+      ctx.beginPath();
+      ctx.arc(x + w * 0.62, y + h / 2, Math.min(w, h) * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  private agentColor(agent: AgentState): string {
+    switch (agent.state) {
+      case 'stowing':
+        return COLORS.stowing;
+      case 'shuffling':
+        return COLORS.shuffling;
+      case 'walking':
+        return agent.blocked ? COLORS.blocked : COLORS.walking;
+      default:
+        return COLORS.walking;
+    }
+  }
+
+  /**
+   * Passenger doors and overwing exits at their published stations.
+   *
+   * A narrow-body carries four passenger doors, not one — 1L/1R forward and
+   * 2L/2R aft — plus the overwing exits between them. Boarding uses 1L, which
+   * is why that one is picked out; the rest are drawn because they are there.
+   */
+  private drawDoors(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const t = cabin.type;
+
+    for (const door of t.doors) {
+      if (door.type !== 'passenger') continue;
+      const x = l.noseX + door.stationM * l.scale;
+      if (x < l.noseX || x > l.tailX) continue;
+      const boarding = door.id === '1L';
+      const y = door.id.endsWith('L') ? l.top : l.bottom;
+
+      ctx.strokeStyle = boarding ? COLORS.textBright : COLORS.hullSoft;
+      ctx.lineWidth = boarding ? 4 : 2.5;
+      ctx.beginPath();
+      ctx.moveTo(x - l.scale * 0.4, y);
+      ctx.lineTo(x + l.scale * 0.4, y);
+      ctx.stroke();
+
+      if (boarding) {
+        ctx.fillStyle = COLORS.textBright;
+        ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
+        ctx.textAlign = 'center';
+        ctx.fillText('1L', x, l.top - 7);
+      }
+    }
+  }
+
+  /** A scale bar, because a drawing claiming to be to scale should show it. */
+  private drawScale(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const metres = 5;
+    const w = metres * l.scale;
+    if (w < 24) return;
+    const x = l.noseX;
+    const y = l.queueY - 26;
+
+    ctx.strokeStyle = COLORS.text;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 3);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + w, y);
+    ctx.lineTo(x + w, y - 3);
+    ctx.stroke();
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = canvasFont(TYPE.micro);
+    ctx.textAlign = 'left';
+    ctx.fillText(`${metres} m`, x + w + 6, y + 2);
+    ctx.fillText(cabin.type.name, x + w + 44, y + 2);
+  }
+
+  /**
+   * The queue still on the jetbridge, in boarding order, coloured by how far
+   * down the cabin each passenger is headed.
+   *
+   * This is where a strategy becomes legible before anything happens: a
+   * back-to-front queue is a clean gradient, Steffen's alternates, and random
+   * boarding is noise.
+   */
+  private drawQueue(l: Layout, cabin: Cabin, snapshot: SimSnapshot): void {
+    const { ctx } = this;
+    const waiting = snapshot.agents
+      .filter((a) => a.state === 'queued')
+      .sort((a, b) => a.order - b.order);
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
+    ctx.textAlign = 'left';
+    ctx.fillText(
+      `jetbridge · ${waiting.length} waiting`,
+      l.noseX,
+      l.queueY - 11,
+    );
+
+    if (waiting.length === 0) return;
+
+    const laneX0 = l.noseX;
+    const laneX1 = l.tailX;
+    const dot = 4;
+    const slots = Math.max(1, Math.floor((laneX1 - laneX0) / (dot + 2)));
+    // The head of the queue sits nearest the door, at the left.
+    const shown = waiting.slice(0, slots);
+
+    for (let i = 0; i < shown.length; i++) {
+      const agent = shown[i] as AgentState;
+      const x = laneX0 + i * (dot + 2);
+      const depth = (agent.passenger.seat.row - 1) / Math.max(1, cabin.config.rows - 1);
+      ctx.fillStyle = queueColor(depth);
+      ctx.fillRect(x, l.queueY - dot, dot, dot);
+    }
+
+    if (waiting.length > shown.length) {
+      ctx.fillStyle = COLORS.text;
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        `+${waiting.length - shown.length}`,
+        laneX0 + shown.length * (dot + 2) + 4,
+        l.queueY,
+      );
+    }
+  }
+}
+
+/** Front of cabin (blue) through to the rear (orange). */
+function queueColor(t: number): string {
+  const k = Math.min(1, Math.max(0, t));
+  return `rgb(${Math.round(91 + k * 164)},${Math.round(147 - k * 40)},${Math.round(240 - k * 187)})`;
+}
+
+/** Canvas state colours, so the legend cannot drift out of sync with the draw. */
+export const STATE_COLORS: Record<string, string> = {
+  walking: COLORS.walking,
+  blocked: COLORS.blocked,
+  stowing: COLORS.stowing,
+  shuffling: COLORS.shuffling,
+  seated: COLORS.seatTaken,
+};
+
+export { COLORS, GROUP_COLORS };

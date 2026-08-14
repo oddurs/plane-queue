@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PLANE QUEUE — boarding strategy simulator</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-name">plane queue</span>
+          <span class="brand-sub">boarding simulator</span>
+        </div>
+        <div class="config-summary" id="masthead-meta"></div>
+        <div class="topbar-actions">
+          <label class="toggle">
+            <input id="race" type="checkbox" />
+            <span>Race</span>
+          </label>
+          <select id="opponent" aria-label="Opponent strategy"></select>
+          <button id="pin" class="btn">Pin run</button>
+          <button id="inspector-toggle" class="btn btn-icon" aria-expanded="false">
+            Configure
+          </button>
+        </div>
+      </header>
+
+      <main class="frame">
+      <section class="viewport">
+        <div class="lanes" id="lanes"></div>
+        <p class="verdict" id="verdict" hidden></p>
+      </section>
+
+      <div class="deck">
+        <div class="transport">
+          <button id="play" class="btn btn-play">Play</button>
+          <button id="step" class="btn">Step</button>
+          <button id="reset" class="btn">Reset</button>
+          <label class="speed">
+            <input id="speed" type="range" min="1" max="60" step="1" value="12" />
+            <output id="speed-value">12×</output>
+          </label>
+          <ul class="legend">
+            <li><i data-key="walking"></i>walking</li>
+            <li><i data-key="blocked"></i>blocked</li>
+            <li><i data-key="stowing"></i>stowing</li>
+            <li><i data-key="shuffling"></i>shuffle</li>
+            <li><i data-key="seated"></i>seated</li>
+          </ul>
+          <p class="keyhint"><kbd>space</kbd><kbd>r</kbd><kbd>←→</kbd></p>
+        </div>
+        <p class="note strategy-note" id="strategy-note"></p>
+      </div>
+
+        <div class="drawer-bar">
+          <button class="drawer-handle" id="drawer-handle" aria-expanded="false">
+            <span>Analysis</span>
+            <span class="drawer-caret">▾</span>
+          </button>
+          <div class="precision" id="precision" hidden></div>
+        </div>
+
+        <nav class="tabs" id="tabs" role="tablist">
+          <button role="tab" data-tab="this-run" class="tab">This run</button>
+          <button role="tab" data-tab="compare" class="tab">Compare</button>
+          <button role="tab" data-tab="search" class="tab">Search</button>
+          <button role="tab" data-tab="findings" class="tab">Findings</button>
+          <button role="tab" data-tab="bench" class="tab">Bench</button>
+          <button role="tab" data-tab="sources" class="tab">Sources</button>
+        </nav>
+
+        <div class="views" id="views">
+          <!-- =========================== THIS RUN ========================== -->
+          <section class="view" data-view="this-run">
+            <div class="block">
+              <div class="block-bar"><h2>Boarding curve <span class="rule-tail"></span></h2></div>
+              <div id="curve" class="chart"></div>
+            </div>
+
+            <div class="block">
+              <div class="block-bar"><h2>Who waits <span class="rule-tail"></span></h2></div>
+              <p class="note" id="equity-note"></p>
+              <div id="equity" class="chart"></div>
+              <div id="equity-bands"></div>
+            </div>
+
+            <div class="block">
+              <div class="block-bar"><h2>Where the aisle jammed <span class="rule-tail"></span></h2></div>
+              <p class="note">
+                Passenger-seconds spent blocked, by row across and time downward,
+                aligned with the cabin above. A jam forms <em>behind</em> whoever
+                is stowing, so congestion shows up forward of its cause:
+                back-to-front lights the front of the cabin, because that bright
+                block is the queue backed up toward the door.
+              </p>
+              <div id="heatmap" class="chart heatmaps"></div>
+            </div>
+          </section>
+
+          <!-- =========================== COMPARE =========================== -->
+          <section class="view" data-view="compare">
+            <div class="block">
+              <div class="block-bar">
+                <h2>Strategy ranking</h2>
+                <div class="bar-controls">
+                  <label class="field-inline">
+                    <input id="natural-groups" type="checkbox" checked />
+                    <span>Realistic gate groups</span>
+                  </label>
+                  <button id="run-batch" class="btn btn-quiet">Re-run</button>
+                </div>
+              </div>
+              <p class="note" id="batch-hint">
+                Runs every strategy over the same passengers and seeds. Bars show
+                the median, whiskers the interquartile range. Where whiskers
+                overlap, the difference is not resolved at this many trials.
+              </p>
+              <div id="comparison" class="chart"></div>
+            </div>
+
+            <div class="block">
+              <div class="block-bar">
+                <h2>When does it matter</h2>
+                <div class="bar-controls">
+                  <select id="sweep-axis" aria-label="Sweep parameter"></select>
+                  <button id="run-sweep" class="btn btn-quiet">Re-run</button>
+                </div>
+              </div>
+              <p class="note" id="sweep-hint">
+                Sweeps one parameter and re-runs every strategy at each value. The
+                crossings and convergences are the point: a ranking that only holds
+                at one operating point is not a recommendation.
+              </p>
+              <div id="sweep" class="chart"></div>
+            </div>
+          </section>
+
+          <!-- ============================ SEARCH =========================== -->
+          <section class="view" data-view="search">
+            <div class="block">
+              <div class="block-bar">
+                <h2>Search for a better policy</h2>
+                <div class="bar-controls">
+                  <button id="run-optimize" class="btn btn-quiet">Re-run</button>
+                </div>
+              </div>
+              <p class="note" id="opt-hint">
+                Steffen found his optimum by Markov Chain Monte Carlo on an
+                idealised model. This runs the same kind of annealing search
+                against the full simulator, so the answer respects the constraints
+                you have set. The winner is re-scored on seeds the search never
+                saw, and a margin is only called a win if it clears the noise.
+              </p>
+              <p class="note caveat">
+                Read the result as a statement about this model, not about
+                aircraft. Where it beats Steffen it does so partly by packing the
+                aisle more densely than his two-row spacing allows — this simulator
+                charges a flat penalty for stowing beside someone rather than
+                modelling how much two people at neighbouring bins truly obstruct
+                each other.
+              </p>
+              <div id="opt-progress" class="chart"></div>
+              <div id="opt-result"></div>
+            </div>
+          </section>
+
+          <!-- =========================== FINDINGS ========================== -->
+          <section class="view" data-view="findings">
+            <div class="block">
+              <div class="block-bar">
+                <h2>The debrief <span class="rule-tail"></span></h2>
+                <button id="run-findings" class="btn btn-quiet">Re-run</button>
+              </div>
+              <p class="note" id="findings-hint">
+                Changes one thing at a time against your current settings and
+                measures what it is worth — which lever actually moves boarding
+                time here, and which only looks like it does. Effects inside the
+                run-to-run noise are reported as such rather than dressed up.
+              </p>
+              <div id="findings"></div>
+            </div>
+          </section>
+
+          <!-- ============================ BENCH ============================ -->
+          <section class="view" data-view="bench">
+            <div class="block">
+              <div class="block-bar">
+                <h2>The bench <span class="rule-tail"></span></h2>
+                <span class="note pin-hint" id="bench-hint"></span>
+              </div>
+              <p class="note">
+                Runs kept aside so they can be argued about. Pinning samples the
+                scenario properly rather than saving a single boarding, so any
+                two pins can be compared under the same noise test as every
+                other claim here.
+              </p>
+              <div id="bench"></div>
+            </div>
+          </section>
+
+          <!-- =========================== SOURCES =========================== -->
+          <section class="view" data-view="sources">
+            <div class="block">
+              <div class="block-bar">
+                <h2>Calibration check</h2>
+                <button id="run-calibration" class="btn btn-quiet">Re-run</button>
+              </div>
+              <p class="note">
+                Runs the five methods on the mock 757 the engine is fitted to and
+                compares against the published times.
+              </p>
+              <div id="calibration"></div>
+            </div>
+
+            <div class="block" id="research"></div>
+          </section>
+        </div>
+
+        <aside class="inspector" id="inspector" hidden>
+          <div class="inspector-head">
+            <h2>Configuration</h2>
+            <button id="inspector-close" class="btn btn-quiet">Close</button>
+          </div>
+          <section class="control-group">
+            <h2>Preset</h2>
+            <div class="presets" id="presets"></div>
+          </section>
+          <div id="controls"></div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
