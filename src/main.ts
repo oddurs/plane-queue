@@ -271,19 +271,63 @@ function setPlaying(next: boolean): void {
 // ---- controls --------------------------------------------------------------
 
 /**
- * Rebuilds the settings panel after every change, so dependent controls — the
- * release-group readout, the first-class cap — reflect what was just applied.
+ * Which controls the panel should currently be showing.
+ *
+ * Only a change here needs new DOM; everything else is a value the existing
+ * controls can be synced to. Rebuilding on every change destroyed the element
+ * under the pointer on the first `input` event of a drag, which left every
+ * slider keyboard-only.
  */
+function controlShape(s: Scenario): string {
+  return [
+    s.boarding.strategy,
+    s.cabin.typeId ?? 'a320',
+    s.population.partyFraction > 0,
+    s.population.assistanceFraction > 0,
+  ].join('|');
+}
+
+let syncControls: (() => void) | null = null;
+/** A rebuild asked for mid-gesture, deferred so it cannot interrupt the drag. */
+let pendingRebuild = false;
+
 function refreshControls(): void {
-  buildControls($('controls'), scenario, (mutate) => {
+  syncControls = buildControls($('controls'), scenario, (mutate) => {
+    const before = controlShape(scenario);
     mutate(scenario);
     restart();
-    refreshControls();
+    if (controlShape(scenario) === before) {
+      syncControls?.();
+    } else if (dragging) {
+      pendingRebuild = true;
+    } else {
+      refreshControls();
+    }
     paintNote();
     paintMasthead();
     // Every panel's numbers were computed for the old scenario.
     invalidateAnalyses();
     refreshActiveView();
+  });
+}
+
+/**
+ * A pointer held down on a control is a gesture in progress. Replacing the DOM
+ * under it would end the gesture, so structural changes wait for the release.
+ */
+let dragging = false;
+function watchGestures(): void {
+  const host = $('controls');
+  host.addEventListener('pointerdown', () => {
+    dragging = true;
+  });
+  window.addEventListener('pointerup', () => {
+    if (!dragging) return;
+    dragging = false;
+    if (pendingRebuild) {
+      pendingRebuild = false;
+      refreshControls();
+    }
   });
 }
 
@@ -935,6 +979,7 @@ paintBench();
 buildSweepPicker();
 buildResearch($('research'));
 refreshControls();
+watchGestures();
 paintNote();
 paintLegend();
 rebuildLanes();
