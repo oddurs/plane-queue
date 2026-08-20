@@ -11,7 +11,9 @@
  */
 
 import { next } from '@vercel/edge';
-import { passwordMatches, sign, verify } from './src/gate/token.ts';
+// Extensionless, unlike the rest of the project: Vercel bundles this file with
+// its own resolver, which rejects an explicit `.ts` in the specifier.
+import { passwordMatches, sign, verify } from './src/gate/token';
 
 export const config = { matcher: '/:path*' };
 
