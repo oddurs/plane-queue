@@ -216,3 +216,50 @@ describe('what each kind costs', () => {
     expect(m.complete).toBe(true);
   });
 });
+
+describe('seat interference, named', () => {
+  it('records who stood up, and lets them sit back down', () => {
+    // The delay was always charged; the seats were not named, so the drawing
+    // could only show a halo where two people getting out of their row belongs.
+    const s = structuredClone(DEFAULT_SCENARIO);
+    s.boarding = { ...s.boarding, strategy: 'random', releaseGroups: 1 };
+    const sim = createSimulation(s);
+
+    let sawDisplaced = false;
+    while (sim.step()) {
+      for (const agent of sim.agents) {
+        if (agent.displaced.length === 0) continue;
+        sawDisplaced = true;
+        // Only somebody mid-shuffle has anyone on their feet for them...
+        expect(agent.state).toBe('shuffling');
+        // ...and everyone standing is in their row, between them and the aisle.
+        for (const seat of agent.displaced) {
+          expect(seat.row).toBe(agent.passenger.seat.row);
+          expect(seat.side).toBe(agent.passenger.seat.side);
+          expect(seat.depth).toBeLessThan(agent.passenger.seat.depth);
+        }
+      }
+    }
+
+    expect(sawDisplaced, 'nobody was ever displaced').toBe(true);
+    // Everyone is back down at the end.
+    expect(sim.agents.every((a) => a.displaced.length === 0)).toBe(true);
+  });
+
+  it('counts a displacement for every interference it charges for', () => {
+    const s = structuredClone(DEFAULT_SCENARIO);
+    s.boarding = { ...s.boarding, strategy: 'random', releaseGroups: 1 };
+    const sim = createSimulation(s);
+    let episodes = 0;
+    const seen = new Set<number>();
+    while (sim.step()) {
+      for (const agent of sim.agents) {
+        if (agent.displaced.length > 0 && !seen.has(agent.passenger.id)) {
+          seen.add(agent.passenger.id);
+          episodes++;
+        }
+      }
+    }
+    expect(episodes).toBe(sim.metrics().seatInterferenceTotal);
+  });
+});

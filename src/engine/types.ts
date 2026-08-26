@@ -371,6 +371,14 @@ export interface AgentState extends AisleOccupant {
   binOffset: number;
   /** Bags taken at the gate, so never stowed in the cabin. */
   gateCheckedBags: number;
+  /**
+   * Seats whose occupants are on their feet to let this passenger past.
+   *
+   * The simulation has always charged for this — it is the seat interference
+   * the whole literature is about — but only as time. Naming the seats lets the
+   * drawing show what the delay actually is: two people standing in the aisle.
+   */
+  displaced: Seat[];
 }
 
 export interface SeatInterferenceCounts {
