@@ -8,6 +8,7 @@ import type {
   Passenger,
   PassengerWait,
   SeatInterferenceCounts,
+  Seat,
   SimParams,
 } from './types.ts';
 import { ASSISTANCE_KINDS } from './types.ts';
@@ -165,6 +166,7 @@ export class Simulation {
       blockedTime: 0,
       blocked: false,
       binOffset: 0,
+      displaced: [],
     }));
 
     this.queue = [...this.agents];
@@ -758,7 +760,9 @@ export class Simulation {
 
   private beginSeating(agent: AgentState): void {
     const seat = agent.passenger.seat;
-    const blocked = this.blockedDepths(seat.row, seat.side, seat.depth);
+    const inTheWay = this.blockedSeats(seat.row, seat.side, seat.depth);
+    const blocked = inTheWay.map((s) => s.depth);
+    agent.displaced = inTheWay;
 
     let t = this.seatingTime(agent);
     if (blocked.length > 0) {
@@ -789,14 +793,14 @@ export class Simulation {
     return t;
   }
 
-  /** Depths of seated passengers between this seat and the aisle. */
-  private blockedDepths(row: number, side: string, depth: number): number[] {
-    const depths: number[] = [];
+  /** Seated passengers between this seat and the aisle. */
+  private blockedSeats(row: number, side: string, depth: number): Seat[] {
+    const seats: Seat[] = [];
     for (const seat of this.cabin.seatsByRow[row - 1] ?? []) {
       if (seat.side !== side || seat.depth >= depth) continue;
-      if (this.occupied.has(`${seat.row}:${seat.letter}`)) depths.push(seat.depth);
+      if (this.occupied.has(`${seat.row}:${seat.letter}`)) seats.push(seat);
     }
-    return depths;
+    return seats;
   }
 
   /**
@@ -828,6 +832,7 @@ export class Simulation {
     // The lift is done; the escorts turn round and head for the door.
     if (agent.passenger.assistance === 'aisle-chair') this.releaseCrew(agent.passenger.id);
     agent.state = 'seated';
+    agent.displaced = [];
     agent.pos = -1;
     agent.blocked = false;
     this.seatedCount++;

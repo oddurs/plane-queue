@@ -601,42 +601,72 @@ export class CabinRenderer {
     const { ctx } = this;
     const r = Math.max(2.2, Math.min(l.rowW[0] ?? 10, l.gap) * 0.3);
 
+    // Who is standing where, so somebody held up can be drawn closing the gap
+    // rather than parked in the middle of a cell with a hole in front of them.
+    const atCell = new Map<number, AgentState>();
+    for (const agent of snapshot.agents) {
+      if (agent.pos >= 0 && agent.state !== 'seated') atCell.set(agent.pos, agent);
+    }
+
     for (const agent of snapshot.agents) {
       if (agent.pos < 0) continue;
 
       const target = aisleX(l, agent.pos);
       let x = target;
       if (agent.state === 'walking' && agent.stepDuration > 0 && agent.fromPos >= 0) {
+        // A person does not cross a row at a constant speed and then stop dead.
+        // Easing each step is the single thing that makes the queue read as
+        // people walking rather than counters sliding between squares.
+        const raw = Math.min(1, Math.max(0, 1 - agent.timer / agent.stepDuration));
+        const eased = raw < 0.5 ? 2 * raw * raw : 1 - 2 * (1 - raw) * (1 - raw);
         const from = aisleX(l, agent.fromPos);
-        const progress = Math.min(1, Math.max(0, 1 - agent.timer / agent.stepDuration));
-        x = from + (target - from) * progress;
+        x = from + (target - from) * eased;
+      }
+
+      if (agent.blocked && atCell.has(agent.pos + 1)) {
+        // Closed up on whoever is in the way, the way a queue actually stands.
+        x += (l.rowW[agent.pos] ?? 10) * 0.18;
       }
 
       const seat = agent.passenger.seat;
       const [sx, sy, sw, sh] = seatRect(l, seat, maxDepth(cabin, seat.row));
       const seatCentreY = sy + sh / 2;
+      const toSeat = Math.sign(seatCentreY - l.aisleY) || 1;
 
-      // Stepping out of the aisle into the row: slide toward the seat as the
-      // shuffle completes, so sitting down reads as a movement.
+      // Square on to the aisle while walking; turned toward the row to work at
+      // the bins, and turned the rest of the way to sit down.
       let y = l.aisleY;
+      let angle = 0;
+
+      if (agent.state === 'stowing') {
+        angle = toSeat * 0.85;
+        y = l.aisleY + toSeat * r * 0.28;
+      }
+
       if (agent.state === 'shuffling' && agent.stepDuration >= 0) {
+        // Stepping out of the aisle into the row: sliding toward the seat while
+        // turning to face it, so sitting down reads as a movement. The turn
+        // leads the slide, as it does in a real aisle.
         const total = Math.max(0.001, agent.timer + 0.001);
         const settle = Math.min(1, Math.max(0, 1 - total / 4));
         y = l.aisleY + (seatCentreY - l.aisleY) * settle * 0.55;
         x = x + (sx + sw / 2 - x) * settle * 0.55;
+        angle = toSeat * (Math.PI / 2) * Math.min(1, settle * 1.6);
       }
 
-      // A gait bob, phase-locked to the passenger and the clock. Deterministic,
-      // and read-only with respect to the simulation.
+      // A gait, phase-locked to the passenger and the clock, and quicker for a
+      // quicker walker. Deterministic, and read-only with respect to the model.
+      let swing = 0;
       if (agent.state === 'walking' && !agent.blocked && !REDUCED_MOTION) {
-        const phase = agent.passenger.id * 1.7 + snapshot.time * 5.5;
-        y += Math.sin(phase) * r * 0.22;
+        const cadence = 5.5 / Math.max(0.5, agent.passenger.slowFactor);
+        swing = Math.sin(agent.passenger.id * 1.7 + snapshot.time * cadence);
+        // Weight shifting from one foot to the other, seen from above.
+        y += swing * r * 0.2;
+        angle += swing * 0.1;
       }
 
       const color = this.agentColor(agent);
-      // Facing aft while walking, facing the seat once turning in.
-      const facing = agent.state === 'walking' ? 1 : Math.sign(seatCentreY - l.aisleY) || 1;
-      this.drawFigure(x, y, r, color, agent, facing);
+      this.drawFigure(x, y, r, color, agent, angle, swing);
 
       if (agent.state !== 'seated') {
         ctx.strokeStyle = color;
@@ -645,9 +675,45 @@ export class CabinRenderer {
         ctx.strokeRect(sx + 0.5, sy + 0.5, sw - 1, sh - 1);
         ctx.globalAlpha = 1;
       }
+
+      // Anybody who had to get up to let this passenger past is on their feet
+      // in the aisle. The simulation has always charged for this — it is the
+      // seat interference the whole literature is about — but it was only ever
+      // a number and a halo, and the halo does not say who is standing or why.
+      agent.displaced.forEach((stood, i) => {
+        const [bx, , bw] = seatRect(l, stood, maxDepth(cabin, stood.row));
+        // Out into the aisle and a pace forward, which is where you go to let
+        // somebody into your row — not standing in the row you just left. Each
+        // extra person stands one further along, because two of them cannot be
+        // in the same place and the queue behind can see exactly why it waits.
+        const aside = bw * (0.45 + i * 0.55);
+        this.drawStanding(bx + bw / 2 - aside, l.aisleY - toSeat * r * 0.75, r, toSeat);
+      });
     }
 
     this.drawCrew(l, snapshot, r);
+  }
+
+  /** A neighbour on their feet in the aisle: no bag, turned to their own row. */
+  private drawStanding(x: number, y: number, r: number, facing: number): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(facing * (Math.PI / 2));
+    ctx.globalAlpha = 0.9;
+
+    ctx.fillStyle = COLORS.shuffling;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.7, r * 0.9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.head;
+    ctx.beginPath();
+    ctx.arc(r * 0.16, 0, r * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   /**
@@ -709,37 +775,67 @@ export class CabinRenderer {
     }
   }
 
-  /** A shoulders-and-head figure, with a bag while one is still being carried. */
+  /**
+   * A figure seen from above: shoulders, a head, arms, and whatever they are
+   * carrying.
+   *
+   * Drawn in the body's own frame and then rotated, so somebody turning into a
+   * row turns rather than sliding sideways still square to the aisle, and the
+   * bag stays in the hand holding it.
+   */
   private drawFigure(
     x: number,
     y: number,
     r: number,
     color: string,
     agent: AgentState,
-    facing: number,
+    angle: number,
+    swing: number,
   ): void {
     const { ctx } = this;
+    const carried = agent.passenger.bags - agent.gateCheckedBags;
+    // Smaller people are smaller; the manifest already says who is a child.
+    const scale = agent.passenger.isChild ? 0.78 : 1;
 
-    // Carried luggage, dropped once the bag is in the bin.
-    if (agent.passenger.bags > 0 && agent.state !== 'seated' && r > 3) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.scale(scale, scale);
+
+    // Carried luggage, in the trailing hand, gone once it is in the bin.
+    if (carried > 0 && agent.state !== 'seated' && r > 3) {
       ctx.fillStyle = COLORS.bag;
-      const bw = r * 0.85;
-      ctx.fillRect(x - r * 1.15, y - bw / 2, bw, bw);
+      const bw = r * 0.72;
+      // Lifted toward the bin over the course of the stow.
+      const lift = agent.state === 'stowing' ? r * 0.95 : 0;
+      // Close to the body: it is being wheeled, not carried at arm's length.
+      ctx.fillRect(-r * 0.98, -bw / 2 - lift, bw, bw);
     }
 
-    // Shoulders.
+    // Shoulders: narrow along the walk, broad across it.
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.ellipse(x, y, r * 0.78, r, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, r * 0.74, r, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Head, offset the way the passenger is facing.
+    // Arms, swinging out of phase with one another.
+    if (r > 3.4 && agent.state === 'walking' && !REDUCED_MOTION) {
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(swing * side * r * 0.34, side * r * 0.8, r * 0.17, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Head, offset forward.
     ctx.fillStyle = COLORS.head;
     ctx.beginPath();
-    ctx.arc(x + facing * r * 0.18, y, r * 0.42, 0, Math.PI * 2);
+    ctx.arc(r * 0.2, 0, r * 0.36, 0, Math.PI * 2);
     ctx.fill();
 
-    // Arms raised into the bin while stowing; a halo still marks the stall.
+    ctx.restore();
+
+    // A halo still marks a stall, drawn unrotated so it stays a circle.
     if (agent.state === 'stowing' || agent.state === 'shuffling') {
       ctx.beginPath();
       ctx.arc(x, y, r + 3.5, 0, Math.PI * 2);
