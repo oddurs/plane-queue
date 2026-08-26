@@ -41,6 +41,23 @@ describe('the race', () => {
     }
   });
 
+  it('starts the race when an opponent is chosen', async () => {
+    // The dropdown governs the second lane, which is not on screen until the
+    // race is on — so picking from it used to do nothing anyone could see, and
+    // read as a broken strategy picker sitting in the toolbar.
+    const app = await launch();
+    expect(app.laneNames().length).toBe(1);
+
+    app.select(app.$<HTMLSelectElement>('#opponent'), 'steffen-perfect');
+    expect(app.laneNames()).toEqual(['Back to front', 'Steffen (perfect)']);
+    expect(app.$<HTMLInputElement>('#race').checked).toBe(true);
+  });
+
+  it('says what the dropdown is for', async () => {
+    const app = await launch();
+    expect(app.$<HTMLElement>('.versus').textContent).toBe('vs');
+  });
+
   it('runs the opponent the dropdown names', async () => {
     const app = await launch();
     app.click(app.$('#race'));
