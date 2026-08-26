@@ -42,7 +42,6 @@ describe('the strategy picker', () => {
       app.click(app.pick('strategy', name));
       expect(app.picked('strategy'), name).toBe(name);
       expect(app.laneNames()[0], name).toBe(name);
-      expect(app.masthead().strategy, name).toBe(name);
       seen.set(name, finish(app));
     }
     // No two strategies may produce the same boarding.

@@ -244,13 +244,6 @@ input[type='number'] {
   padding: 12px var(--pad);
 }
 
-/* Prose under a drawing wants a measure, not the width of the aircraft. */
-.viewport .strategy-note {
-  max-width: 78ch;
-  margin: 0 auto;
-  text-align: center;
-}
-
 /*
  * An aircraft from above is about 10:1, so it can never fill a wide frame
  * vertically. Centring it in the space that is left reads as deliberate;
@@ -286,13 +279,19 @@ input[type='number'] {
   min-height: 0;
 }
 
+/*
+ * Name, then the figures, then a rule, then the aircraft.
+ *
+ * Everything you read about a run is above the thing you watch, in one place,
+ * with the drawing sitting under it rather than on top of it.
+ */
 .lane-head {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 10px;
-  padding: 0 2px 6px;
-  font-size: var(--t-small);
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
   flex: none;
 }
 
@@ -333,10 +332,55 @@ input[type='number'] {
 /* Live numbers: a quiet status line, not a set of tiles. */
 .readout {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The clock and the seat count: the two you watch. */
+.stats-key {
+  display: flex;
+  align-items: flex-end;
+  gap: 34px;
   flex-wrap: wrap;
-  gap: 22px;
-  padding: 8px 2px 0;
-  flex: none;
+}
+
+.stats-key .stat {
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.stats-key strong {
+  font-size: 26px;
+  font-weight: var(--w-medium);
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.stats-key span {
+  font-size: var(--t-micro);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+
+/* Everything you look up once something interesting has happened. */
+.stats-rest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  font-size: var(--t-small);
+  color: var(--dim);
+}
+
+.stats-rest strong {
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
 }
 
 .stat {
@@ -453,14 +497,6 @@ kbd {
   padding: 1px 5px;
   border-radius: 3px;
   color: var(--dimmer);
-}
-
-.strategy-note {
-  line-height: var(--lh-prose);
-  margin: 8px 0 0;
-  color: var(--dim);
-  font-size: var(--t-small);
-  max-width: 90ch;
 }
 
 /* ---- controls ------------------------------------------------------------- */
@@ -1354,11 +1390,8 @@ table.measured td:last-child {
 
 /* Short windows — landscape phones especially — need the chrome to win. */
 @media (max-height: 560px) {
-  .viewport {
-    max-height: calc(100vh - 150px);
-  }
-
-  .strategy-note {
+  /* On a short window the second rank of figures is the first thing to go. */
+  .stats-rest {
     display: none;
   }
 }

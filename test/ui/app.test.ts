@@ -178,7 +178,7 @@ describe('the presets', () => {
       // The masthead is drawn from the scenario, so it proves the load landed.
       seen.add(JSON.stringify(app.masthead()));
       // And the panel must be showing the preset's strategy, not the old one.
-      expect(app.picked('strategy')).toBe(app.masthead().strategy);
+      expect(app.picked('strategy')).toBe(app.laneNames()[0]);
     }
     expect(seen.size).toBeGreaterThan(1);
     expect(app.readout()).not.toBe(before);

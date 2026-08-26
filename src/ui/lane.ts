@@ -23,7 +23,7 @@ export class Lane {
   private canvas: HTMLCanvasElement;
   private renderer: CabinRenderer;
   private nameEl: HTMLElement;
-  private timeEl: HTMLElement;
+  private timeEl!: HTMLElement;
   private statsEl: HTMLElement;
   /** Value nodes, kept so updates rewrite text instead of rebuilding the DOM. */
   private statCells = new Map<string, HTMLElement>();
@@ -32,30 +32,32 @@ export class Lane {
     scenario: Scenario,
     public strategy: StrategyId,
     public readonly color: string,
-    showHeader: boolean,
   ) {
     this.root = document.createElement('div');
     this.root.className = 'lane';
 
+    // The head carries the name and every figure. They used to sit under the
+    // drawing, which put the thing you read furthest from the thing you watch
+    // and left the aircraft looking like it was standing on its own statistics.
     const head = document.createElement('div');
     head.className = 'lane-head';
-    head.hidden = !showHeader;
+    // Named in every mode, in the lane's own colour. It used to be hidden
+    // outside a race — or rather it was asked to be, and never was: `hidden` on
+    // an element the stylesheet gives `display: flex` does nothing at all.
     this.nameEl = document.createElement('span');
     this.nameEl.className = 'lane-name';
     this.nameEl.style.color = color;
-    this.timeEl = document.createElement('span');
-    this.timeEl.className = 'lane-time';
-    head.append(this.nameEl, this.timeEl);
+
+    this.statsEl = document.createElement('div');
+    this.statsEl.className = 'readout';
+    head.append(this.nameEl, this.statsEl);
 
     const wrap = document.createElement('div');
     wrap.className = 'canvas-wrap';
     this.canvas = document.createElement('canvas');
     wrap.append(this.canvas);
 
-    this.statsEl = document.createElement('div');
-    this.statsEl.className = 'readout';
-
-    this.root.append(head, wrap, this.statsEl);
+    this.root.append(head, wrap);
     this.buildStats();
     this.renderer = new CabinRenderer(this.canvas);
     this.rebuild(scenario, strategy);
@@ -115,7 +117,6 @@ export class Lane {
     const snap = this.sim.snapshot();
     const m = this.sim.metrics();
 
-    this.timeEl.textContent = formatDuration(snap.time);
     this.timeEl.classList.toggle('finished', this.sim.done);
     // A run stopped by the safety cap is not a boarding time; the tick that
     // marks completion must not appear on it.
@@ -146,10 +147,20 @@ export class Lane {
     if (cell && cell.textContent !== value) cell.textContent = value;
   }
 
+  /**
+   * Two ranks of figure.
+   *
+   * The clock and the seat count are what you watch while it runs, so they are
+   * given size and put first; the other eight are what you look up once
+   * something interesting has happened, and they are quiet until then. Ten
+   * numbers at one weight is a table, not a readout.
+   */
   private buildStats(): void {
-    const cells: [string, string][] = [
+    const KEY: [string, string][] = [
       ['elapsed', 'Elapsed'],
       ['seated', 'Seated'],
+    ];
+    const REST: [string, string][] = [
       ['waiting', 'Waiting'],
       ['shuffles', 'Shuffles'],
       ['bins', 'Bin hunts'],
@@ -160,18 +171,36 @@ export class Lane {
       ['transfers', 'Transfers'],
       ['crewhold', 'Crew hold'],
     ];
+
     this.statsEl.replaceChildren();
     this.statCells.clear();
-    for (const [key, label] of cells) {
-      const cell = document.createElement('div');
-      cell.className = 'stat';
-      const name = document.createElement('span');
-      name.textContent = label;
-      const value = document.createElement('strong');
-      value.textContent = '–';
-      cell.append(name, value);
-      this.statsEl.append(cell);
-      this.statCells.set(key, value);
-    }
+
+    const rank = (cells: [string, string][], className: string): HTMLElement => {
+      const row = document.createElement('div');
+      row.className = className;
+      for (const [key, label] of cells) {
+        const cell = document.createElement('div');
+        cell.className = 'stat';
+        const value = document.createElement('strong');
+        value.textContent = '–';
+        const name = document.createElement('span');
+        name.textContent = label;
+        // Figure above its label in the first rank, label first in the second:
+        // one is read at a glance, the other is scanned for a name.
+        cell.append(...(className === 'stats-key' ? [value, name] : [name, value]));
+        row.append(cell);
+        this.statCells.set(key, value);
+      }
+      return row;
+    };
+
+    const keyRow = rank(KEY, 'stats-key');
+    this.statsEl.append(keyRow, rank(REST, 'stats-rest'));
+
+    // The clock is also the run's state — finished, or stopped by the cap — so
+    // the element showing it is the one that carries that.
+    const clock = this.statCells.get('elapsed') as HTMLElement;
+    clock.classList.add('lane-time');
+    this.timeEl = clock;
   }
 }
