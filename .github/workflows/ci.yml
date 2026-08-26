@@ -1,0 +1,39 @@
+# Checks a pull request before it can land.
+#
+# The deploy workflow already runs the tests, but only on a push to main —
+# which is to say after the merge, when the answer is no longer useful. This
+# runs the same gate on the branch, so a pull request carries a verdict, and
+# so auto-merge has something to wait for.
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+
+# Nothing here writes anything.
+permissions:
+  contents: read
+
+# A new push supersedes whatever was already running for that branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Matched to the deploy workflow: the point of this job is to fail
+          # here rather than there, which it can only do on the same runtime.
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # `build` runs `tsc --noEmit` before vite, so this is the typecheck too.
+      - run: npm run build
+        env:
+          BASE_PATH: /plane-queue/

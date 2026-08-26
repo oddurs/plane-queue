@@ -1,0 +1,35 @@
+# Turns on GitHub's native auto-merge for a pull request labelled `automerge`.
+#
+# Native rather than merging from here on purpose: auto-merge is held by the
+# branch's own protection rules, so the pull request lands when CI passes and
+# not one moment before. A workflow that ran `gh pr merge` directly would be
+# merging on its own authority and would happily land a red branch.
+#
+# The label is the switch. Nothing merges itself without one.
+name: Automerge
+
+on:
+  # `pull_request_target` so the definition comes from the base branch: this
+  # then applies to pull requests opened before it existed, and its token is
+  # not one a branch can rewrite. Safe here because no branch code is checked
+  # out or run — the job only calls the API.
+  pull_request_target:
+    types: [labeled, opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'automerge')
+      && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge "$PR" --repo "$REPO" --auto --squash
