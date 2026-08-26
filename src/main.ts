@@ -379,7 +379,15 @@ function buildOpponentPicker(): void {
   const select = $<HTMLSelectElement>('opponent');
   select.addEventListener('change', () => {
     opponent = select.value as StrategyId;
+    // An opponent only exists in a race, so choosing one starts it. Otherwise
+    // the control sits in the toolbar looking like the strategy picker and
+    // doing nothing visible, because the lane it governs is not on screen.
+    if (!racing) {
+      racing = true;
+      $<HTMLInputElement>('race').checked = true;
+    }
     restart();
+    paintNote();
   });
   paintOpponentPicker();
 }

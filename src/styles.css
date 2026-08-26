@@ -182,6 +182,21 @@ input[type='number'] {
   flex: none;
 }
 
+/*
+ * Says what the picker beside it is for.
+ *
+ * Unlabelled, a list of strategy names in the toolbar reads as *the* strategy
+ * picker, and choosing from it looks like it does nothing — the strategy it
+ * sets belongs to the second lane, which is not on screen until the race is on.
+ */
+.versus {
+  font-size: var(--t-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+  margin-left: -2px;
+}
+
 /* ---- viewport ------------------------------------------------------------- */
 
 .frame {
