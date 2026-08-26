@@ -10,7 +10,8 @@ describe('the app boots', () => {
     expect(app.picked('strategy')).toBe('Back to front');
     expect(app.picked('aircraft')).toBe('Airbus A320-200');
     expect(app.stat('Seated')).toMatch(/^\d+\/\d+$/);
-    expect(app.masthead().strategy).toBe('Back to front');
+    // The masthead states the configuration; the lane names its own strategy.
+    expect(app.masthead()).toMatchObject({ rows: '30', gate: '4 groups' });
   });
 
   it('runs a boarding to completion', async () => {

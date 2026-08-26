@@ -82,7 +82,6 @@ function rebuildLanes(): void {
         scenario,
         i === 0 ? scenario.boarding.strategy : opponent,
         i === 0 ? LANE_A_COLOR : LANE_B_COLOR,
-        racing,
       );
       lanes.push(lane);
       host.append(lane.root);
@@ -272,6 +271,11 @@ function setPlaying(next: boolean): void {
 }
 
 // ---- controls --------------------------------------------------------------
+//
+// The strategy's blurb used to be repeated under the aircraft as well as under
+// the picker that sets it. Two copies of the same paragraph, one of them across
+// the drawing you are trying to watch; the one by the picker is the one that
+// answers a question you are actually asking, so that is the one that stayed.
 
 /**
  * Which controls the panel should currently be showing.
@@ -309,7 +313,6 @@ function refreshControls(): void {
     } else {
       refreshControls();
     }
-    paintNote();
     paintMasthead();
     // Every panel's numbers were computed for the old scenario.
     invalidateAnalyses();
@@ -337,19 +340,6 @@ function watchGestures(): void {
   });
 }
 
-function paintNote(): void {
-  const note = $('strategy-note');
-  note.hidden = racing;
-  if (scenario.boarding.strategy === 'custom') {
-    note.textContent = discovered
-      ? `Discovered policy — ${discovered.description}.`
-      : 'A policy found by the optimizer.';
-    return;
-  }
-  const meta = STRATEGIES.find((s) => s.id === scenario.boarding.strategy);
-  if (meta) note.textContent = meta.blurb;
-}
-
 function buildPresets(): void {
   const host = $('presets');
   host.replaceChildren();
@@ -364,7 +354,6 @@ function buildPresets(): void {
       invalidateAnalyses();
       refreshActiveView();
       refreshControls();
-      paintNote();
       paintMasthead();
       $('preset-blurb').textContent = p.blurb;
       host.querySelectorAll('.preset').forEach((el) => el.classList.remove('active'));
@@ -390,7 +379,6 @@ function buildOpponentPicker(): void {
       $<HTMLInputElement>('race').checked = true;
     }
     restart();
-    paintNote();
   });
   paintOpponentPicker();
 }
@@ -487,7 +475,6 @@ document.addEventListener('keydown', (event) => {
 $<HTMLInputElement>('race').addEventListener('change', (e) => {
   racing = (e.target as HTMLInputElement).checked;
   restart();
-  paintNote();
 });
 
 const speedInput = $<HTMLInputElement>('speed');
@@ -653,7 +640,6 @@ function renderFindings(analysis: AnalysisResult): void {
     setPlaying(false);
     rebuildLanes();
     refreshControls();
-    paintNote();
     paintMasthead();
   });
 }
@@ -744,7 +730,6 @@ function paintBench(): void {
       scenario = structuredClone(pin.scenario);
       restart();
       refreshControls();
-      paintNote();
       paintMasthead();
       tabs.show('this-run');
     },
@@ -882,7 +867,6 @@ function renderOptimizeResult(result: OptimizeResult, elapsedMs: number): void {
     paintOpponentPicker();
     rebuildLanes();
     refreshControls();
-    paintNote();
     paintMasthead();
     $('lanes').scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
@@ -953,7 +937,9 @@ function paintMasthead(): void {
         ? 'strict'
         : `${scenario.boarding.releaseGroups} groups`,
     ],
-    ['strategy', strategyName(scenario.boarding.strategy)],
+    // Not the strategy: each lane names its own, in its own colour, directly
+    // above the aircraft running it. Here it could only ever name one of them,
+    // and in a race that is the more misleading half of the answer.
   ];
   $('masthead-meta').innerHTML = rows
     .map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`)
@@ -1030,7 +1016,6 @@ buildSweepPicker();
 buildResearch($('research'));
 refreshControls();
 watchGestures();
-paintNote();
 paintLegend();
 rebuildLanes();
 paintMasthead();
