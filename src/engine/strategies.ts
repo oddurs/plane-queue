@@ -81,14 +81,57 @@ export function strategyName(id: StrategyId): string {
   return STRATEGIES.find((s) => s.id === id)?.name ?? id;
 }
 
-type Sorter = (cabin: Cabin, passengers: Passenger[], opts: StrategyOptions) => Passenger[];
+/**
+ * A passenger in intended boarding order, tagged with the group the gate would
+ * call them in.
+ *
+ * The group is what makes a strategy deployable: an airline calls "group 3", it
+ * does not hand out 165 numbered tickets. Carrying it alongside the order lets
+ * the gate model coarsen the queue at the strategy's own boundaries instead of
+ * guessing where they fall.
+ */
+export interface OrderedPassenger {
+  passenger: Passenger;
+  /** The strategy's own called group, numbered densely from 0 in board order. */
+  group: number;
+}
 
-/** Stable sort by a numeric key; ties keep their incoming (randomised) order. */
-function byKey(passengers: Passenger[], key: (p: Passenger) => number): Passenger[] {
-  return passengers
-    .map((p, i) => ({ p, i, k: key(p) }))
-    .sort((a, b) => a.k - b.k || a.i - b.i)
-    .map((x) => x.p);
+type Sorter = (
+  cabin: Cabin,
+  passengers: Passenger[],
+  opts: StrategyOptions,
+) => OrderedPassenger[];
+
+/**
+ * Orders passengers by the group the gate calls them in, refining ties with
+ * `within` and then by incoming (randomised) order.
+ *
+ * Groups come back renumbered densely from 0, so callers can treat the count as
+ * the number of announcements the gate has to make.
+ */
+function byGroup(
+  passengers: Passenger[],
+  group: (p: Passenger) => number,
+  within: (p: Passenger) => number = () => 0,
+): OrderedPassenger[] {
+  const sorted = passengers
+    .map((p, i) => ({ p, i, g: group(p), w: within(p) }))
+    .sort((a, b) => a.g - b.g || a.w - b.w || a.i - b.i);
+
+  const result: OrderedPassenger[] = [];
+  let previous: number | null = null;
+  let dense = -1;
+  for (const entry of sorted) {
+    if (previous === null || entry.g !== previous) dense++;
+    previous = entry.g;
+    result.push({ passenger: entry.p, group: dense });
+  }
+  return result;
+}
+
+/** Every passenger their own group: a strictly ordered, numbered queue. */
+function strictOrder(passengers: Passenger[]): OrderedPassenger[] {
+  return passengers.map((passenger, group) => ({ passenger, group }));
 }
 
 /** Which block a row falls into, counting from the rear. */
@@ -98,37 +141,39 @@ function blockFromRear(row: number, rows: number, blocks: number): number {
 }
 
 const SORTERS: Record<StrategyId, Sorter> = {
-  random: (_cabin, passengers) => passengers,
+  random: (_cabin, passengers) => byGroup(passengers, () => 0),
 
   // Within a block, window seats are still called before aisle seats — that is
   // how the method is defined when run properly, and it is why Steffen &
   // Hotchkiss recorded zero seat interferences for it. Coarsening the queue
-  // with release groups is what destroys that ordering in practice.
+  // below one group per block is what destroys that ordering in practice.
   'back-to-front': (cabin, passengers, opts) =>
-    byKey(
+    byGroup(
       passengers,
-      (p) =>
-        blockFromRear(p.seat.row, cabin.config.rows, opts.blocks) * 3 + (2 - p.seat.depth),
+      (p) => blockFromRear(p.seat.row, cabin.config.rows, opts.blocks),
+      (p) => 2 - p.seat.depth,
     ),
 
   'front-to-back': (cabin, passengers, opts) => {
     const size = Math.ceil(cabin.config.rows / opts.blocks);
-    return byKey(
+    return byGroup(
       passengers,
-      (p) => Math.floor((p.seat.row - 1) / size) * 3 + (2 - p.seat.depth),
+      (p) => Math.floor((p.seat.row - 1) / size),
+      (p) => 2 - p.seat.depth,
     );
   },
 
-  // Window (depth 2) first, then middle, then aisle.
-  'outside-in': (_cabin, passengers) => byKey(passengers, (p) => -p.seat.depth),
+  // Window (depth 2) first, then middle, then aisle: three announcements.
+  'outside-in': (_cabin, passengers) => byGroup(passengers, (p) => 2 - p.seat.depth),
 
   /**
    * Reverse pyramid: board along diagonals running from the rear window to the
-   * front aisle. Combining the row block and the seat depth into one key gives
-   * the characteristic wave (van den Briel et al., 2005).
+   * front aisle. The row block and the seat depth summed into one key give the
+   * characteristic wave (van den Briel et al., 2005), and each diagonal band is
+   * one called group.
    */
   'reverse-pyramid': (cabin, passengers, opts) =>
-    byKey(
+    byGroup(
       passengers,
       (p) =>
         blockFromRear(p.seat.row, cabin.config.rows, opts.blocks) + (2 - p.seat.depth),
@@ -142,10 +187,13 @@ const SORTERS: Record<StrategyId, Sorter> = {
    * Nesting matches the paper's Figure 4: seat depth (window, then middle, then
    * aisle) outermost, then row parity, then side, then rows from the rear. That
    * produces waves of six — 12A, 10A, 8A, 6A, 4A, 2A — exactly two rows apart.
+   *
+   * Every passenger is their own group: the method only works from a numbered
+   * queue, which is precisely the objection to it.
    */
   'steffen-perfect': (cabin, passengers) => {
     const rows = cabin.config.rows;
-    return byKey(passengers, (p) => {
+    const ordered = byGroup(passengers, (p) => {
       const { row, side, depth } = p.seat;
       const depthRank = 2 - depth; // window first
       const sideRank = side === 'left' ? 0 : 1;
@@ -153,6 +201,7 @@ const SORTERS: Record<StrategyId, Sorter> = {
       const position = rows - row; // later rows board earlier within a wave
       return ((depthRank * 2 + parity) * 2 + sideRank) * (rows + 1) + position;
     });
+    return strictOrder(ordered.map((o) => o.passenger));
   },
 
   /**
@@ -161,16 +210,39 @@ const SORTERS: Record<StrategyId, Sorter> = {
    * why it survives contact with real passengers.
    */
   'steffen-modified': (_cabin, passengers) =>
-    byKey(passengers, (p) => (2 - p.seat.depth) * 2 + (p.seat.row % 2)),
+    byGroup(passengers, (p) => (2 - p.seat.depth) * 2 + (p.seat.row % 2)),
 
+  // Two announcements: the forward cabin and priority tiers, then everyone.
   'premium-first': (_cabin, passengers) =>
-    byKey(passengers, (p) => (p.seat.cabinClass === 'first' ? 0 : 1)),
+    byGroup(passengers, (p) => (p.seat.cabinClass === 'first' ? 0 : 1)),
 
   // Driven by weights the optimizer discovered; falls back to outside-in if
-  // asked to run without any.
+  // asked to run without any. Like Steffen's optimum it is a numbered queue.
   custom: (cabin, passengers, opts) =>
-    policyOrder(cabin, passengers, opts.weights ?? { row: 0, depth: -1, parity: 0, side: 0 }),
+    strictOrder(
+      policyOrder(cabin, passengers, opts.weights ?? { row: 0, depth: -1, parity: 0, side: 0 }),
+    ),
 };
+
+/**
+ * The order a strategy intends, with each passenger tagged by called group.
+ *
+ * This is what the gate model consumes; `orderPassengers` is the same thing
+ * with the groups dropped, for callers that only care about the sequence.
+ */
+export function orderWithGroups(
+  strategy: StrategyId,
+  cabin: Cabin,
+  passengers: Passenger[],
+  opts: StrategyOptions,
+  rng: Rng,
+): OrderedPassenger[] {
+  // Shuffle first so that every tie inside a strategy breaks randomly rather
+  // than by seat id, which would fake an ordering the airline never imposed.
+  const shuffled = rng.shuffle([...passengers]);
+  const sorter = SORTERS[strategy];
+  return sorter(cabin, shuffled, opts);
+}
 
 export function orderPassengers(
   strategy: StrategyId,
@@ -179,11 +251,20 @@ export function orderPassengers(
   opts: StrategyOptions,
   rng: Rng,
 ): Passenger[] {
-  // Shuffle first so that every tie inside a strategy breaks randomly rather
-  // than by seat id, which would fake an ordering the airline never imposed.
-  const shuffled = rng.shuffle([...passengers]);
-  const sorter = SORTERS[strategy];
-  return sorter(cabin, shuffled, opts);
+  return orderWithGroups(strategy, cabin, passengers, opts, rng).map((o) => o.passenger);
+}
+
+/**
+ * Picks the strategy to race `strategy` against, keeping `preferred` if it can.
+ *
+ * Both lanes run the same seed and the same population, so a strategy raced
+ * against itself is not a close result — it is the identical run twice, and the
+ * verdict reads "dead heat". The opponent therefore can never be lane A.
+ */
+export function pickOpponent(strategy: StrategyId, preferred: StrategyId): StrategyId {
+  if (preferred !== strategy) return preferred;
+  const fallback = STRATEGIES.find((meta) => meta.id !== strategy);
+  return fallback?.id ?? preferred;
 }
 
 /**

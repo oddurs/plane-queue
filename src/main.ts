@@ -3,7 +3,7 @@ import { DEFAULT_SCENARIO, type Scenario } from './engine/run.ts';
 import { findAxis, SWEEP_AXES, type SweepParam } from './engine/batch.ts';
 import { createCompute } from './ui/compute.ts';
 import { PRESETS } from './engine/presets.ts';
-import { naturalGroups, STRATEGIES, strategyName } from './engine/strategies.ts';
+import { naturalGroups, pickOpponent, STRATEGIES, strategyName } from './engine/strategies.ts';
 import type { AnalysisResult } from './engine/insights.ts';
 import type { StrategyId } from './engine/types.ts';
 import { buildControls } from './ui/controls.ts';
@@ -256,6 +256,9 @@ function tick(now: number): void {
  */
 function restart(): void {
   const wasPlaying = playing;
+  // Before the lanes are built: a strategy change can collide with the
+  // opponent, and this is what moves it out of the way.
+  paintOpponentPicker();
   rebuildLanes();
   setPlaying(wasPlaying);
 }
@@ -271,19 +274,63 @@ function setPlaying(next: boolean): void {
 // ---- controls --------------------------------------------------------------
 
 /**
- * Rebuilds the settings panel after every change, so dependent controls — the
- * release-group readout, the first-class cap — reflect what was just applied.
+ * Which controls the panel should currently be showing.
+ *
+ * Only a change here needs new DOM; everything else is a value the existing
+ * controls can be synced to. Rebuilding on every change destroyed the element
+ * under the pointer on the first `input` event of a drag, which left every
+ * slider keyboard-only.
  */
+function controlShape(s: Scenario): string {
+  return [
+    s.boarding.strategy,
+    s.cabin.typeId ?? 'a320',
+    s.population.partyFraction > 0,
+    s.population.assistanceFraction > 0,
+  ].join('|');
+}
+
+let syncControls: (() => void) | null = null;
+/** A rebuild asked for mid-gesture, deferred so it cannot interrupt the drag. */
+let pendingRebuild = false;
+
 function refreshControls(): void {
-  buildControls($('controls'), scenario, (mutate) => {
+  syncControls = buildControls($('controls'), scenario, (mutate) => {
+    const before = controlShape(scenario);
     mutate(scenario);
     restart();
-    refreshControls();
+    if (controlShape(scenario) === before) {
+      syncControls?.();
+    } else if (dragging) {
+      pendingRebuild = true;
+    } else {
+      refreshControls();
+    }
     paintNote();
     paintMasthead();
     // Every panel's numbers were computed for the old scenario.
     invalidateAnalyses();
     refreshActiveView();
+  });
+}
+
+/**
+ * A pointer held down on a control is a gesture in progress. Replacing the DOM
+ * under it would end the gesture, so structural changes wait for the release.
+ */
+let dragging = false;
+function watchGestures(): void {
+  const host = $('controls');
+  host.addEventListener('pointerdown', () => {
+    dragging = true;
+  });
+  window.addEventListener('pointerup', () => {
+    if (!dragging) return;
+    dragging = false;
+    if (pendingRebuild) {
+      pendingRebuild = false;
+      refreshControls();
+    }
   });
 }
 
@@ -330,18 +377,38 @@ function buildPresets(): void {
 
 function buildOpponentPicker(): void {
   const select = $<HTMLSelectElement>('opponent');
+  select.addEventListener('change', () => {
+    opponent = select.value as StrategyId;
+    restart();
+  });
+  paintOpponentPicker();
+}
+
+/**
+ * Fills the opponent list, leaving out whatever lane A is already running.
+ *
+ * The two lanes share a seed and a population, so racing a strategy against
+ * itself is not a close result — it is the identical run twice, down to the
+ * pixel, and the verdict reads "dead heat". Offering the choice at all made the
+ * race look broken, because the default opponent was the default strategy.
+ */
+function paintOpponentPicker(): void {
+  const select = $<HTMLSelectElement>('opponent');
+  const choices = STRATEGIES.filter((meta) => meta.id !== scenario.boarding.strategy);
+  opponent = pickOpponent(scenario.boarding.strategy, opponent);
+  // The optimizer can leave 'custom' here, which the list never offers.
+  if (!choices.some((meta) => meta.id === opponent)) {
+    opponent = choices[0]?.id ?? opponent;
+  }
+
   select.replaceChildren();
-  for (const meta of STRATEGIES) {
+  for (const meta of choices) {
     const option = document.createElement('option');
     option.value = meta.id;
     option.textContent = meta.name;
     option.selected = meta.id === opponent;
     select.append(option);
   }
-  select.addEventListener('change', () => {
-    opponent = select.value as StrategyId;
-    restart();
-  });
 }
 
 // ---- wiring ----------------------------------------------------------------
@@ -349,10 +416,12 @@ function buildOpponentPicker(): void {
 $('play').addEventListener('click', () => setPlaying(!playing));
 
 $('step').addEventListener('click', () => {
-  setPlaying(false);
   // One second of simulated time per click reads better than one 0.25s tick.
   for (let i = 0; i < 1 / scenario.params.tick; i++) stepAll();
-  draw(true);
+  // Pausing after the step, not before it: stepping to the end has to leave the
+  // button offering a replay rather than a play that silently restarts. It
+  // repaints too, so the explicit draw the step used to make is now its job.
+  setPlaying(false);
 });
 
 $('reset').addEventListener('click', () => {
@@ -792,6 +861,8 @@ function renderOptimizeResult(result: OptimizeResult, elapsedMs: number): void {
     racing = true;
     $<HTMLInputElement>('race').checked = true;
     setPlaying(false);
+    // The baseline was chosen here, not in the dropdown; show it there too.
+    paintOpponentPicker();
     rebuildLanes();
     refreshControls();
     paintNote();
@@ -935,6 +1006,7 @@ paintBench();
 buildSweepPicker();
 buildResearch($('research'));
 refreshControls();
+watchGestures();
 paintNote();
 paintLegend();
 rebuildLanes();

@@ -10,7 +10,7 @@ import type { StrategyId } from '../engine/types.ts';
 
 type Change = (mutate: (s: Scenario) => void) => void;
 
-interface SliderSpec {
+export interface SliderSpec {
   label: string;
   min: number;
   max: number;
@@ -137,13 +137,31 @@ const PASSENGERS: SliderSpec[] = [
   },
 ];
 
-function sliders(specs: SliderSpec[], scenario: Scenario, onChange: Change): HTMLElement[] {
+/**
+ * Every continuous control the panel offers, so a test can sweep exactly the
+ * range a user can reach rather than a hand-copied approximation of it.
+ */
+export const CONTROL_SPECS: SliderSpec[] = [...AIRCRAFT, ...PASSENGERS];
+
+/** The discrete controls, likewise. */
+export const GATE_RANGES = {
+  /** 13 on the slider means "strict order", i.e. no grouping. */
+  releaseGroups: { min: 1, max: 13 },
+  blocks: { min: 2, max: 12 },
+} as const;
+
+function sliders(
+  specs: SliderSpec[],
+  scenario: Scenario,
+  onChange: Change,
+  syncs: Sync[],
+): HTMLElement[] {
   return specs
     .filter((spec) => spec.applies?.(scenario) ?? true)
-    .map((spec) => slider(spec, scenario, onChange));
+    .map((spec) => slider(spec, scenario, onChange, syncs));
 }
 
-function slider(spec: SliderSpec, scenario: Scenario, onChange: Change): HTMLElement {
+function slider(spec: SliderSpec, scenario: Scenario, onChange: Change, syncs: Sync[]): HTMLElement {
   const wrap = document.createElement('label');
   wrap.className = 'field';
 
@@ -165,6 +183,14 @@ function slider(spec: SliderSpec, scenario: Scenario, onChange: Change): HTMLEle
     const v = Number(input.value);
     value.textContent = spec.format(v);
     onChange((s) => spec.set(s, v));
+  });
+
+  // One control can move another — dragging Rows down clamps first-class rows.
+  // Re-reading from the scenario keeps them honest without rebuilding the panel.
+  syncs.push(() => {
+    const v = spec.get(scenario);
+    input.value = String(v);
+    value.textContent = spec.format(v);
   });
 
   wrap.append(head, input);
@@ -208,17 +234,33 @@ function checkbox(
   return wrap;
 }
 
+type Sync = () => void;
+
+/**
+ * Draws the panel and returns a function that refreshes every control's value
+ * in place.
+ *
+ * The panel used to be rebuilt on every change, which meant the first `input`
+ * event of a slider drag replaced the element being dragged and the browser
+ * dropped the gesture — sliders could only be moved by the keyboard. Values are
+ * synced instead, and the structure is only rebuilt when the set of visible
+ * controls actually changes.
+ */
 export function buildControls(
   host: HTMLElement,
   scenario: Scenario,
   onChange: Change,
-): void {
+): Sync {
   host.replaceChildren();
+  const syncs: Sync[] = [];
 
   // Strategy picker. Eight blurb cards were most of the sidebar's weight, so
   // only the selected strategy explains itself.
   const picker = document.createElement('div');
   picker.className = 'strategy-list';
+  // The aircraft picker below borrows this list's styling, so the two are
+  // told apart by what they choose rather than by how they look.
+  picker.dataset.picker = 'strategy';
   for (const meta of STRATEGIES) {
     const btn = document.createElement('button');
     btn.className = 'strategy' + (meta.id === scenario.boarding.strategy ? ' active' : '');
@@ -273,6 +315,11 @@ export function buildControls(
   const gHint = document.createElement('small');
   gHint.textContent =
     'Order is only enforced between groups, never inside one. 1 group turns any strategy into random boarding; strict order needs a numbered queue at the gate.';
+  syncs.push(() => {
+    const groups = scenario.boarding.releaseGroups;
+    gInput.value = groups === null ? '13' : String(Math.min(12, groups));
+    gValue.textContent = groups === null ? 'strict order' : String(groups);
+  });
   groupsField.append(gHead, gInput, gHint);
   gate.push(groupsField);
 
@@ -297,6 +344,7 @@ export function buildControls(
         },
         scenario,
         onChange,
+        syncs,
       ),
     );
   }
@@ -346,6 +394,7 @@ export function buildControls(
   // else is drawn and timed against.
   const typePicker = document.createElement('div');
   typePicker.className = 'strategy-list';
+  typePicker.dataset.picker = 'aircraft';
   for (const type of AIRCRAFT_TYPES) {
     const btn = document.createElement('button');
     btn.className = 'strategy' + (type.id === (scenario.cabin.typeId ?? 'a320') ? ' active' : '');
@@ -366,10 +415,10 @@ export function buildControls(
     section('Aircraft', [
       typePicker,
       provenance,
-      ...sliders(AIRCRAFT, scenario, onChange),
+      ...sliders(AIRCRAFT, scenario, onChange, syncs),
     ]),
   );
-  host.append(section('Passengers', sliders(PASSENGERS, scenario, onChange)));
+  host.append(section('Passengers', sliders(PASSENGERS, scenario, onChange, syncs)));
 
   // Seed.
   const seedField = document.createElement('label');
@@ -390,4 +439,9 @@ export function buildControls(
   seedHint.textContent = 'Same seed, same passengers — so switching strategy is a fair test.';
   seedField.append(sHead, seedInput, seedHint);
   host.append(section('Seed', [seedField]));
+
+  return () => {
+    for (const sync of syncs) sync();
+    seedInput.value = String(scenario.seed);
+  };
 }
