@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { buildCabin, seatLabel } from '../src/engine/cabin.ts';
 import { generatePopulation } from '../src/engine/passengers.ts';
-import { orderPassengers } from '../src/engine/strategies.ts';
+import {
+  naturalGroups,
+  orderPassengers,
+  orderWithGroups,
+  pickOpponent,
+  STRATEGIES,
+} from '../src/engine/strategies.ts';
 import { buildQueue } from '../src/engine/groups.ts';
 import { Rng } from '../src/engine/rng.ts';
 import type { BoardingConfig, Passenger, StrategyId } from '../src/engine/types.ts';
@@ -29,6 +35,14 @@ function order(strategy: StrategyId, blocks = 4): Passenger[] {
 }
 
 const labels = (pax: Passenger[]): string[] => pax.map((p) => seatLabel(p.seat));
+
+/** The same fixture as `order`, keeping the called groups the gate model needs. */
+function withGroups(strategy: StrategyId, blocks = 4) {
+  return orderWithGroups(strategy, cabin, fullCabin(), { blocks }, new Rng(2));
+}
+
+const seatsOf = (ordered: { passenger: Passenger }[]): string[] =>
+  ordered.map((o) => seatLabel(o.passenger.seat));
 
 describe('boarding strategies', () => {
   it('seats the whole cabin exactly once whatever the strategy', () => {
@@ -125,20 +139,20 @@ const boarding = (over: Partial<BoardingConfig> = {}): BoardingConfig => ({
 
 describe('gate queue construction', () => {
   it('preserves the strategy order exactly when enforcement is strict', () => {
-    const ordered = order('steffen-perfect');
+    const ordered = withGroups('steffen-perfect');
     const queue = buildQueue(ordered, boarding(), new Rng(3));
-    expect(queue.map((q) => seatLabel(q.passenger.seat))).toEqual(labels(ordered));
+    expect(queue.map((q) => seatLabel(q.passenger.seat))).toEqual(seatsOf(ordered));
   });
 
   it('collapses to random boarding with a single release group', () => {
-    const ordered = order('steffen-perfect');
+    const ordered = withGroups('steffen-perfect');
     const queue = buildQueue(ordered, boarding({ releaseGroups: 1 }), new Rng(3));
     expect(queue.every((q) => q.group === 0)).toBe(true);
-    expect(queue.map((q) => seatLabel(q.passenger.seat))).not.toEqual(labels(ordered));
+    expect(queue.map((q) => seatLabel(q.passenger.seat))).not.toEqual(seatsOf(ordered));
   });
 
   it('keeps release groups contiguous and correctly sized', () => {
-    const ordered = order('outside-in');
+    const ordered = withGroups('outside-in');
     const queue = buildQueue(ordered, boarding({ releaseGroups: 3 }), new Rng(3));
     const groups = queue.map((q) => q.group);
     expect([...groups].sort((a, b) => a - b)).toEqual(groups);
@@ -162,7 +176,7 @@ describe('gate queue construction', () => {
       },
       new Rng(9),
     );
-    const ordered = orderPassengers('steffen-perfect', cabin, pax, { blocks: 4 }, new Rng(2));
+    const ordered = orderWithGroups('steffen-perfect', cabin, pax, { blocks: 4 }, new Rng(2));
     const queue = buildQueue(ordered, boarding({ familiesBoardTogether: true }), new Rng(3));
 
     const positions = new Map<number, number[]>();
@@ -194,7 +208,7 @@ describe('gate queue construction', () => {
       },
       new Rng(31),
     );
-    const ordered = orderPassengers('steffen-perfect', cabin, pax, { blocks: 4 }, new Rng(2));
+    const ordered = orderWithGroups('steffen-perfect', cabin, pax, { blocks: 4 }, new Rng(2));
     const queue = buildQueue(
       ordered,
       boarding({ familiesBoardTogether: true, releaseGroups: 4 }),
@@ -222,7 +236,7 @@ describe('gate queue construction', () => {
   });
 
   it('still scrambles solo passengers within a release group', () => {
-    const ordered = order('outside-in');
+    const ordered = withGroups('outside-in');
     const queue = buildQueue(
       ordered,
       boarding({ familiesBoardTogether: true, releaseGroups: 3 }),
@@ -230,7 +244,7 @@ describe('gate queue construction', () => {
     );
     // The fixture has no parties, so party-atomic shuffling must not become an
     // accidental no-op that preserves the strategy order.
-    expect(queue.map((q) => seatLabel(q.passenger.seat))).not.toEqual(labels(ordered));
+    expect(queue.map((q) => seatLabel(q.passenger.seat))).not.toEqual(seatsOf(ordered));
   });
 
   it('lifts passengers needing assistance and their party to the front', () => {
@@ -246,7 +260,7 @@ describe('gate queue construction', () => {
       },
       new Rng(21),
     );
-    const ordered = orderPassengers('back-to-front', cabin, pax, { blocks: 4 }, new Rng(2));
+    const ordered = orderWithGroups('back-to-front', cabin, pax, { blocks: 4 }, new Rng(2));
     const queue = buildQueue(ordered, boarding({ preboardAssistance: true }), new Rng(3));
 
     const lastPreboard = queue.findLastIndex((q) => q.group === -1);
@@ -265,5 +279,156 @@ describe('gate queue construction', () => {
     for (const q of queue.slice(lastPreboard + 1)) {
       expect(q.passenger.needsAssistance).toBe(false);
     }
+  });
+});
+
+/**
+ * The gate model must reproduce a strategy exactly when the gate makes as many
+ * announcements as the strategy defines, and coarsen it honestly below that.
+ *
+ * The failure this pins down: release groups used to be equal-sized slices of
+ * the queue rather than the strategy's own groups. That is invisible whenever a
+ * strategy's groups happen to be equal — blocks of rows, window/middle/aisle —
+ * and destroys the ones that are not. "Premium to coach" boards a dozen
+ * first-class passengers ahead of a hundred and fifty in economy, so an even
+ * cut released most of economy first and the method decayed into random
+ * boarding while still calling itself premium-first.
+ */
+describe('gate discipline', () => {
+  // A real cabin: first class at 2-2 makes the strategies' groups unequal,
+  // which is exactly the case the even-slice model got wrong.
+  const airliner = buildCabin({ rows: 30, firstClassRows: 3, binSlotsPerRow: 8 });
+  const population = {
+    loadFactor: 1,
+    meanBags: 1,
+    partyFraction: 0,
+    assistanceFraction: 0,
+    childFraction: 0,
+    speedSpread: 0.25,
+  };
+  const gate = (over: Partial<BoardingConfig> = {}): BoardingConfig => ({
+    strategy: 'random',
+    blocks: 4,
+    releaseGroups: null,
+    preboardAssistance: false,
+    familiesBoardTogether: false,
+    ...over,
+  });
+
+  const intended = (strategy: StrategyId, blocks = 4) =>
+    orderWithGroups(
+      strategy,
+      airliner,
+      generatePopulation(airliner, population, new Rng(1)),
+      { blocks },
+      new Rng(2),
+    );
+
+  /** Which of the strategy's own groups ended up in each released group. */
+  function naturalPerReleased(
+    ordered: ReturnType<typeof intended>,
+    queue: { passenger: Passenger; group: number }[],
+  ): Map<number, Set<number>> {
+    const source = new Map(ordered.map((o) => [o.passenger.id, o.group]));
+    const seen = new Map<number, Set<number>>();
+    for (const entry of queue) {
+      const set = seen.get(entry.group) ?? new Set<number>();
+      set.add(source.get(entry.passenger.id) as number);
+      seen.set(entry.group, set);
+    }
+    return seen;
+  }
+
+  it.each(STRATEGIES.map((m) => [m.id, m.id] as const))(
+    '%s is reproduced group for group at its natural count',
+    (_name, strategy) => {
+      const ordered = intended(strategy);
+      const groups = naturalGroups(strategy, { blocks: 4 });
+      const queue = buildQueue(ordered, gate({ strategy, releaseGroups: groups }), new Rng(3));
+
+      const perReleased = naturalPerReleased(ordered, queue);
+      for (const [released, natural] of perReleased) {
+        expect(natural.size, `released group ${released} merged ${natural.size} groups`).toBe(1);
+      }
+      expect(perReleased.size).toBe(new Set(ordered.map((o) => o.group)).size);
+    },
+  );
+
+  it('declares the group count each strategy actually produces', () => {
+    // naturalGroups feeds the control panel's default. If it drifts from what
+    // the sorter really does, selecting a strategy silently mis-sets the gate.
+    for (const { id } of STRATEGIES) {
+      const actual = new Set(intended(id).map((o) => o.group)).size;
+      const declared = naturalGroups(id, { blocks: 4 });
+      if (declared === null) expect(actual, id).toBe(intended(id).length);
+      else expect(declared, id).toBe(actual);
+    }
+  });
+
+  it('releases the forward cabin on its own under premium to coach', () => {
+    const ordered = intended('premium-first');
+    const queue = buildQueue(
+      ordered,
+      gate({ strategy: 'premium-first', releaseGroups: 2 }),
+      new Rng(3),
+    );
+    const firstGroup = queue.filter((q) => q.group === 0);
+    expect(firstGroup.length).toBeGreaterThan(0);
+    expect(firstGroup.every((q) => q.passenger.seat.cabinClass === 'first')).toBe(true);
+    // And nobody from the forward cabin is left behind in the second call.
+    expect(
+      queue.filter((q) => q.group === 1).every((q) => q.passenger.seat.cabinClass === 'economy'),
+    ).toBe(true);
+  });
+
+  it.each(STRATEGIES.map((m) => [m.id, m.id] as const))(
+    '%s never splits one of its groups across two announcements',
+    (_name, strategy) => {
+      const ordered = intended(strategy);
+      const natural = new Set(ordered.map((o) => o.group)).size;
+      for (let k = 1; k <= Math.min(12, natural + 3); k++) {
+        const queue = buildQueue(ordered, gate({ strategy, releaseGroups: k }), new Rng(5));
+        const source = new Map(ordered.map((o) => [o.passenger.id, o.group]));
+
+        // Every natural group lands wholly inside one released group...
+        const home = new Map<number, number>();
+        for (const entry of queue) {
+          const g = source.get(entry.passenger.id) as number;
+          const seen = home.get(g);
+          if (seen === undefined) home.set(g, entry.group);
+          else expect(seen, `${strategy} k=${k}: group ${g} split`).toBe(entry.group);
+        }
+        // ...released groups stay in order and are contiguous in the queue...
+        const order = queue.map((q) => q.group);
+        expect([...order].sort((a, b) => a - b), `${strategy} k=${k}`).toEqual(order);
+        // ...and the gate makes as many announcements as it said it would.
+        expect(new Set(order).size, `${strategy} k=${k}`).toBe(Math.min(k, natural));
+      }
+    },
+  );
+
+  it('collapses every strategy to one group when the gate calls once', () => {
+    for (const { id } of STRATEGIES) {
+      const queue = buildQueue(intended(id), gate({ strategy: id, releaseGroups: 1 }), new Rng(7));
+      expect(new Set(queue.map((q) => q.group)).size, id).toBe(1);
+    }
+  });
+});
+
+describe('race pairings', () => {
+  // A race shares its seed and its population between the lanes, so the same
+  // strategy on both sides is the identical run twice — it always reported a
+  // dead heat, which read as "the picker does nothing".
+  it('never races a strategy against itself', () => {
+    for (const { id } of STRATEGIES) {
+      for (const { id: preferred } of STRATEGIES) {
+        expect(pickOpponent(id, preferred), `${id} vs ${preferred}`).not.toBe(id);
+      }
+    }
+  });
+
+  it('leaves a valid opponent alone', () => {
+    expect(pickOpponent('back-to-front', 'outside-in')).toBe('outside-in');
+    expect(pickOpponent('custom', 'steffen-perfect')).toBe('steffen-perfect');
   });
 });

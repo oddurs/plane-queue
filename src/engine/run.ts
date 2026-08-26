@@ -1,6 +1,6 @@
 import { buildCabin } from './cabin.ts';
 import { generatePopulation } from './passengers.ts';
-import { orderPassengers } from './strategies.ts';
+import { orderWithGroups } from './strategies.ts';
 import { buildQueue } from './groups.ts';
 import { Simulation, DEFAULT_PARAMS } from './sim.ts';
 import { Rng } from './rng.ts';
@@ -55,7 +55,7 @@ export function createSimulation(scenario: Scenario): Simulation {
   const passengers = generatePopulation(cabin, scenario.population, populationRng);
 
   const orderRng = new Rng(scenario.seed ^ 0x9e3779b9);
-  const ordered = orderPassengers(
+  const ordered = orderWithGroups(
     scenario.boarding.strategy,
     cabin,
     passengers,
