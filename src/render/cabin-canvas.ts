@@ -144,37 +144,6 @@ export function requiredWidth(cabin: Cabin): number {
 }
 
 /**
- * Canvas height the drawing needs at a given width.
- *
- * `layout` centres the aircraft in whatever height it is handed and hangs the
- * wings, the row numbers and the jetbridge lane below it, so the frame cannot
- * simply be told to fill its container: too tall and the aeroplane floats in a
- * void with its own statistics a screen away, too short and `queueY` hits its
- * `height - 6` clamp and rides up into the row numbers. The drawing knows how
- * much room it wants, so it says.
- *
- * Only the cabin band scales with the width; everything under it is fixed. With
- * `d` as half the slack, `layout` puts the band at `originY = d - 14` and the
- * queue at `bottom + wingSpan + 64`, and clamps that to `height - 6`. Asking
- * for no clamping at the widest the wings are ever drawn:
- *
- *     cabinH + 2d - 6  >=  (d - 14) + cabinH + 54 + 64
- *                    d  >=  110
- *
- * which is the 220 below.
- */
-export function requiredHeight(cabin: Cabin, width: number): number {
-  const scale = (width - 24) / drawnLengthM(cabin);
-  // The gate sits above the aircraft and has to clear the wings, which reach
-  // `wingSpan` up from the cabin band. Every pixel of clearance costs two of
-  // height, because the aeroplane is centred in whatever it is given.
-  const gate = showsGate(width) ? 52 : 0;
-  return Math.ceil(cabin.type.cabinWidthM * scale + 220 + gate);
-}
-
-
-
-/**
  * Whether there is width to draw the gate rather than a strip of dots.
  *
  * Two cabins racing get half the frame each, and a lounge squeezed into that is
@@ -184,7 +153,36 @@ function showsGate(width: number): boolean {
   return width >= 880;
 }
 
-function layout(cabin: Cabin, width: number, height: number): Layout {
+/**
+ * `inset` draws the cabin alone, filling the frame.
+ *
+ * The whole-aircraft view has to leave room under the hull for wings, row
+ * numbers and the queue, and it centres the aeroplane in what is left — which
+ * caps how large it can ever be drawn. A cutaway wants none of that: no wings,
+ * nothing below, and the cabin band using every pixel of height there is,
+ * because height is what buys pixels per passenger.
+ */
+interface LayoutOptions {
+  inset?: boolean;
+  /**
+   * Draw the cabin as a band of this many pixels rather than to its true beam.
+   *
+   * The overview is a schematic, not a scale drawing: it has one job, which is
+   * to say where in the aeroplane you are looking and roughly how full it is,
+   * and it has to do it across the full width in very little height. Squashing
+   * the cross-section is the honest way to buy that — every row still gets its
+   * true share of the length, and only the beam is a lie, which is the one
+   * dimension the overview is not being read for.
+   */
+  band?: number;
+}
+
+function layout(
+  cabin: Cabin,
+  width: number,
+  height: number,
+  opts: LayoutOptions = {},
+): Layout {
   const t = cabin.type;
   const rows = cabin.config.rows;
   const margin = 12;
@@ -193,17 +191,26 @@ function layout(cabin: Cabin, width: number, height: number): Layout {
 
   const byWidth = (width - margin * 2) / totalM;
   // Keep the true beam: the cabin band must also fit the height available.
-  const byHeight = (height - 104) / t.cabinWidthM;
-  const scale = Math.min(byWidth, byHeight);
+  const byHeight = (height - (opts.inset ? 30 : 104)) / t.cabinWidthM;
+  const scale = opts.inset ? byHeight : opts.band ? byWidth : Math.min(byWidth, byHeight);
 
   // Cross section, to scale: sidewall clearance, three seats, the aisle, three
   // seats, sidewall clearance. On the A320 that is 0.43 m seats and a 0.64 m
   // aisle inside a 3.63 m cabin, leaving ~0.20 m of trim each side.
-  const cabinH = t.cabinWidthM * scale;
-  const seatH = t.seatWidthM * scale;
-  const gap = t.aisleWidthM * scale;
+  const cabinH = opts.band ?? t.cabinWidthM * scale;
+  const beam = t.seatWidthM * 6 + t.aisleWidthM;
+  const squash = opts.band ? opts.band / (beam * scale) : 1;
+  const seatH = t.seatWidthM * scale * squash;
+  const gap = t.aisleWidthM * scale * squash;
   const sidewall = Math.max(0, (cabinH - seatH * 6 - gap) / 2);
-  const originY = Math.max(26, (height - cabinH) / 2 - 14);
+  // The schematic sits at the foot of its strip rather than centred in it, so
+  // the whole of the spare height is above the aircraft — which is where the
+  // gate and the airbridge are, and centring would give them half of it.
+  const originY = opts.inset
+    ? (height - cabinH) / 2
+    : opts.band
+      ? height - cabinH - 28
+      : Math.max(26, (height - cabinH) / 2 - 14);
   const seatTopY = originY + sidewall;
 
   const noseX = margin;
@@ -228,7 +235,11 @@ function layout(cabin: Cabin, width: number, height: number): Layout {
   const bottom = originY + cabinH;
   // Wings must fit the canvas: never reach past the top edge, and always leave
   // room beneath for the row numbers and the jetbridge lane.
-  const wingSpan = Math.max(18, Math.min(54, top - 16, height - bottom - 46));
+  const wingSpan = opts.inset
+    ? 0
+    : opts.band
+      ? 12
+      : Math.max(18, Math.min(54, top - 16, height - bottom - 46));
 
   return {
     rowX,
@@ -284,8 +295,19 @@ function aisleX(l: Layout, pos: number): number {
   return (l.rowX[i] ?? l.cabinX1) + (l.rowW[i] ?? 10) / 2;
 }
 
+/** Height given to the whole-aircraft strip, before the cutaway takes the rest. */
+const OVERVIEW_H = 164;
+/** How much of that strip the schematic fuselage itself occupies. */
+const OVERVIEW_BAND = 46;
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
 export class CabinRenderer {
   private ctx: CanvasRenderingContext2D;
+  /** Eased camera centre for the cutaway, in its own pixel space. */
+  private camX: number | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -297,15 +319,17 @@ export class CabinRenderer {
    * Sizes the backing store to the element's CSS box at device resolution.
    *
    * The canvas takes whichever is larger of its frame and the width the cabin
-   * needs to stay legible; when that exceeds the frame the wrapper scrolls. Its
-   * height then follows from that width, so the drawing is exactly as tall as
-   * it needs to be and the lane stays one block rather than two ends of a gap.
+   * needs to stay legible; when that exceeds the frame the wrapper scrolls.
+   *
+   * Height it simply accepts. It used to ask for a specific one, because a
+   * single 10:1 drawing gains nothing from a taller frame — but the cutaway is
+   * a cross-section, and every pixel of height it is given comes back as pixels
+   * per passenger, so there is no longer a height it would decline.
    */
   resize(cabin: Cabin): void {
     const frame = this.canvas.parentElement?.clientWidth ?? 0;
     const width = Math.max(frame, requiredWidth(cabin));
     this.canvas.style.width = `${width}px`;
-    this.canvas.style.height = `${requiredHeight(cabin, width)}px`;
 
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
@@ -314,6 +338,19 @@ export class CabinRenderer {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  /**
+   * An overview strip and a cutaway, one above the other.
+   *
+   * The whole aircraft at once is the wrong scale for the thing this simulates.
+   * A 37 m cabin across a 1450 px frame puts a person at fourteen pixels — not
+   * enough to draw a human being, let alone one turning sideways past a
+   * neighbour with a bag. So the aeroplane entire is a strip at the top, where
+   * it answers where-are-we, and most of the frame goes to a magnified window
+   * onto a dozen rows, where it answers what-is-happening.
+   *
+   * Height is the currency: the cutaway is a cross-section, so every pixel of
+   * frame height buys pixels per passenger. It takes whatever is left.
+   */
   draw(
     cabin: Cabin,
     snapshot: SimSnapshot,
@@ -324,24 +361,109 @@ export class CabinRenderer {
     const rect = this.canvas.getBoundingClientRect();
     const w = rect.width;
     const h = rect.height;
-    const l = layout(cabin, w, h);
 
     ctx.fillStyle = COLORS.fuselage;
     ctx.fillRect(0, 0, w, h);
 
-    this.drawWings(l, cabin);
-    this.drawHull(l);
-    this.drawService(l, cabin);
-    this.drawBins(l, cabin, binSlots);
-    this.drawAisle(l, cabin);
-    this.drawSeats(l, cabin, occupied);
-    this.drawSeated(l, cabin, occupied);
-    this.drawExits(l, cabin);
-    this.drawRowNumbers(l, cabin);
-    this.drawAgents(l, cabin, snapshot);
-    this.drawDoors(l, cabin);
-    this.drawScale(l, cabin);
-    this.drawQueue(l, cabin, snapshot);
+    const overviewH = Math.min(OVERVIEW_H, Math.round(h * 0.42));
+    const cutawayH = h - overviewH;
+
+    // --- the whole aircraft, small -----------------------------------------
+    const ov = layout(cabin, w, overviewH, { band: OVERVIEW_BAND });
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, overviewH);
+    ctx.clip();
+    this.drawWings(ov, cabin);
+    this.drawHull(ov);
+    this.drawService(ov, cabin);
+    this.drawSeats(ov, cabin, occupied);
+    this.drawSeated(ov, cabin, occupied);
+    this.drawExits(ov, cabin);
+    this.drawAgents(ov, cabin, snapshot);
+    this.drawDoors(ov, cabin);
+    this.drawQueue(ov, cabin, snapshot);
+    ctx.restore();
+
+    if (cutawayH < 120) return;
+
+    // --- a dozen rows of it, large ------------------------------------------
+    const cu = layout(cabin, w, cutawayH, { inset: true });
+    const centre = this.follow(snapshot, cu);
+    const pan = clamp(centre - w / 2, 0, Math.max(0, cu.tailX + 12 - w));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, overviewH, w, cutawayH);
+    ctx.clip();
+    ctx.translate(-pan, overviewH);
+    this.drawService(cu, cabin);
+    this.drawBins(cu, cabin, binSlots);
+    this.drawAisle(cu, cabin);
+    this.drawSeats(cu, cabin, occupied);
+    this.drawSeated(cu, cabin, occupied);
+    this.drawExits(cu, cabin);
+    this.drawRowNumbers(cu, cabin);
+    this.drawAgents(cu, cabin, snapshot);
+    this.drawDoors(cu, cabin);
+    ctx.restore();
+
+    // Where the cutaway is looking, marked on the strip above it.
+    this.drawViewport(ov, cu, pan, w, overviewH);
+    this.drawScale(cu, cabin, overviewH + cutawayH - 10, pan);
+  }
+
+  /**
+   * Which stretch of cabin the cutaway looks at, in cutaway pixels.
+   *
+   * The middle of whoever is still on their feet: it is the only part of the
+   * aeroplane where anything is happening, and it walks aft on its own as the
+   * flight boards. Eased toward, so the view drifts rather than snapping — a
+   * camera that jumped every time somebody sat down would be unwatchable.
+   */
+  private follow(snapshot: SimSnapshot, l: Layout): number {
+    const aboard = snapshot.agents.filter((a) => a.pos >= 0 && a.state !== 'seated');
+    const target = aboard.length
+      ? aisleX(l, aboard.reduce((sum, a) => sum + a.pos, 0) / aboard.length)
+      : aisleX(l, 1);
+    this.camX = this.camX === null ? target : this.camX + (target - this.camX) * 0.06;
+    return this.camX;
+  }
+
+  /** The cutaway's window, drawn on the overview so the two read as one thing. */
+  private drawViewport(
+    ov: Layout,
+    cu: Layout,
+    pan: number,
+    w: number,
+    overviewH: number,
+  ): void {
+    const { ctx } = this;
+    const k = ov.scale / cu.scale;
+    const x0 = ov.noseX + (pan - cu.noseX) * k;
+    const width = w * k;
+
+    ctx.save();
+    ctx.strokeStyle = COLORS.textBright;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(
+      Math.round(x0) + 0.5,
+      Math.round(ov.top) - 5.5,
+      Math.round(width),
+      Math.round(ov.cabinH) + 10,
+    );
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // A hairline joining the window to the pane it opens onto.
+    ctx.strokeStyle = COLORS.hullSoft;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.moveTo(0, overviewH - 0.5);
+    ctx.lineTo(w, overviewH - 0.5);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   /**
@@ -935,13 +1057,14 @@ export class CabinRenderer {
   }
 
   /** A scale bar, because a drawing claiming to be to scale should show it. */
-  private drawScale(l: Layout, cabin: Cabin): void {
+  private drawScale(l: Layout, cabin: Cabin, baseline: number, pan: number): void {
     const { ctx } = this;
     const metres = 5;
     const w = metres * l.scale;
-    if (w < 24) return;
-    const x = l.noseX;
-    const y = l.queueY - 26;
+    if (w < 24 || w > 400) return;
+    // Anchored to the pane, not the drawing, because the drawing pans under it.
+    const x = pan + 12;
+    const y = baseline;
 
     ctx.strokeStyle = COLORS.text;
     ctx.lineWidth = 1;
@@ -959,14 +1082,6 @@ export class CabinRenderer {
     ctx.fillText(cabin.type.name, x + w + 44, y + 2);
   }
 
-  /**
-   * The queue still on the jetbridge, in boarding order, coloured by how far
-   * down the cabin each passenger is headed.
-   *
-   * This is where a strategy becomes legible before anything happens: a
-   * back-to-front queue is a clean gradient, Steffen's alternates, and random
-   * boarding is noise.
-   */
   /**
    * The gate, the airbridge, and everybody still on the wrong side of the door.
    *

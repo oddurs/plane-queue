@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCabin } from '../src/engine/cabin.ts';
 import { AIRCRAFT_TYPES } from '../src/engine/aircraft.ts';
-import { requiredHeight } from '../src/render/cabin-canvas.ts';
 import { generatePopulation } from '../src/engine/passengers.ts';
 import { Rng } from '../src/engine/rng.ts';
 import { createSimulation, runScenario, DEFAULT_SCENARIO, type Scenario } from '../src/engine/run.ts';
@@ -149,15 +148,4 @@ describe('the gate drawing', () => {
     }
   });
 
-  it('asks for the height the gate needs, and only when it is drawn', () => {
-    const cabin = buildCabin({ rows: 30, firstClassRows: 3, binSlotsPerRow: 8 });
-    // Two cabins racing get a narrow frame each and keep the compact strip, so
-    // the gate must not levy its clearance on them.
-    const narrow = requiredHeight(cabin, 700);
-    const wide = requiredHeight(cabin, 1400);
-    const wideNoGate = Math.ceil(cabin.type.cabinWidthM * ((1400 - 24) / 37.6) + 220);
-    expect(wide).toBeGreaterThan(wideNoGate);
-    // ...and a narrow frame is still tall enough for the drawing itself.
-    expect(narrow).toBeGreaterThan(cabin.type.cabinWidthM * ((700 - 24) / 37.6) + 200);
-  });
 });

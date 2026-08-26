@@ -317,8 +317,10 @@ input[type='number'] {
 }
 
 .canvas-wrap {
-  /* The drawing sets its own height; this just holds it. */
-  flex: 0 0 auto;
+  /* The drawing takes whatever height is going: the cutaway spends it on
+     pixels per passenger, so more of it is always worth having. */
+  flex: 1 1 auto;
+  min-height: 300px;
   /* The drawing keeps a legible scale and pans when the frame is too narrow. */
   overflow-x: auto;
   overflow-y: hidden;
@@ -327,6 +329,7 @@ input[type='number'] {
 
 .canvas-wrap canvas {
   display: block;
+  height: 100%;
 }
 
 /* Live numbers: a quiet status line, not a set of tiles. */
