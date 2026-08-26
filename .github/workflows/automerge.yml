@@ -27,9 +27,32 @@ jobs:
       && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
+      # `AUTOMERGE_TOKEN` is a personal access token with `repo` scope, and it
+      # is not optional if the site is meant to keep deploying.
+      #
+      # GitHub suppresses workflow runs for events caused by `GITHUB_TOKEN`, so
+      # that a workflow cannot set itself off forever. Auto-merge is attributed
+      # to whoever turned it on — so if this job turns it on with the built-in
+      # token, the merge lands on main and the deploy never fires. The commit
+      # looks identical either way, which is what makes it easy to miss: the
+      # branch is merged, nothing is red, and the site quietly stops updating.
+      #
+      # Falling back to `GITHUB_TOKEN` keeps the label working without the
+      # secret; the deploy then has to be run by hand:
+      #     gh workflow run deploy.yml --ref main
       - name: Enable auto-merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: gh pr merge "$PR" --repo "$REPO" --auto --squash
+
+      # A warning in a log is weak protection against a site that silently
+      # stops updating, so it says exactly what to run.
+      - name: Warn when the merge will not deploy
+        env:
+          PAT: ${{ secrets.AUTOMERGE_TOKEN }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::warning title=This merge will not deploy::No AUTOMERGE_TOKEN secret is set, so auto-merge runs as github-actions[bot] and GitHub suppresses the deploy workflow on the resulting push. Run: gh workflow run deploy.yml --ref main"
+          fi
