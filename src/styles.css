@@ -2,9 +2,10 @@
  * Minimal technical.
  *
  * This is simulation software, so the viewport is the interface and everything
- * else gets out of its way. The plane takes the whole width and most of the
- * height; configuration lives in a drawer that stays closed until asked for;
- * analysis lives under a handle at the bottom.
+ * else gets out of its way. A bar at each edge — what the run is at the top,
+ * what to do with it at the bottom — and the aircraft between them, on a page
+ * that never scrolls. Configuration and analysis are both overlays, because
+ * neither is something you watch.
  *
  * Restraint is the rule. Space separates things rather than borders, labels are
  * small and quiet rather than large and letterspaced, and the only saturated
@@ -21,6 +22,14 @@
   --ink: #e6e8ea;
   --dim: #8b9199;
   --dimmer: #5c626a;
+
+  /*
+   * The two bars are fixed, and three other things have to know how tall they
+   * are: the stage between them, the configuration panel down the side, and the
+   * analysis sheet. Once, here.
+   */
+  --nav-h: 46px;
+  --bar-h: 52px;
 
   --accent: #4a9eff;
   --go: #3ddc84;
@@ -82,10 +91,20 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/*
+ * Top bar, cabin, bottom bar — and the page itself never scrolls.
+ *
+ * The controls that drive the simulation are worth nothing if you have to go
+ * looking for them, so they are pinned at the two edges and everything else
+ * lives in the space between. Analysis is no longer part of that column: it is
+ * a sheet over the top, because it is something you go and read rather than
+ * something you watch.
+ */
 #app {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
+  display: grid;
+  grid-template-rows: var(--nav-h) 1fr var(--bar-h);
+  height: 100dvh;
+  overflow: hidden;
 }
 
 button,
@@ -182,6 +201,14 @@ input[type='number'] {
   flex: none;
 }
 
+/* A hairline, so the race controls and the panel buttons read as two groups. */
+.topbar-rule {
+  width: 1px;
+  height: 18px;
+  background: var(--line-strong);
+  margin: 0 2px;
+}
+
 /*
  * Says what the picker beside it is for.
  *
@@ -199,45 +226,42 @@ input[type='number'] {
 
 /* ---- viewport ------------------------------------------------------------- */
 
-.frame {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+.stage {
   min-height: 0;
+  display: flex;
+  overflow: hidden;
 }
 
 .viewport {
-  flex: 1 1 auto;
+  flex: 1;
+  min-width: 0;
   min-height: 0;
-  /*
-   * Bounded by the chrome that has to stay reachable — topbar, transport deck
-   * and the analysis handle. Without this the lane grew past the window on a
-   * landscape phone and pushed the play button off screen.
-   */
-  max-height: calc(100vh - 200px);
+  overflow: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 8px var(--pad);
+  gap: 10px;
+  padding: 12px var(--pad);
+}
+
+/* Prose under a drawing wants a measure, not the width of the aircraft. */
+.viewport .strategy-note {
+  max-width: 78ch;
+  margin: 0 auto;
+  text-align: center;
 }
 
 /*
  * An aircraft from above is about 10:1, so it can never fill a wide frame
  * vertically. Centring it in the space that is left reads as deliberate;
- * stacking everything at the top and leaving a void underneath does not. Once
- * the analysis drawer is open the viewport yields, since the panels below it
- * are then the thing being read.
+ * stacking everything at the top and leaving a void underneath does not.
  */
-#app.analysis-open .viewport {
-  flex: 0 1 auto;
-  max-height: 44vh;
-}
 
 .lanes {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
 }
 
@@ -245,10 +269,20 @@ input[type='number'] {
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
 }
 
+/*
+ * Name, drawing, readout — one block, held together.
+ *
+ * The drawing used to take every pixel the frame had left, which put the lane's
+ * name against the top of the screen and its statistics against the bottom with
+ * a void between. An aircraft from above is about 10:1: past a certain height
+ * more space buys nothing, so the canvas is capped and the three parts stay
+ * within reading distance of each other.
+ */
 .lane {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   min-height: 0;
 }
 
@@ -284,8 +318,8 @@ input[type='number'] {
 }
 
 .canvas-wrap {
-  flex: 1;
-  min-height: 150px;
+  /* The drawing sets its own height; this just holds it. */
+  flex: 0 0 auto;
   /* The drawing keeps a legible scale and pans when the frame is too narrow. */
   overflow-x: auto;
   overflow-y: hidden;
@@ -293,8 +327,6 @@ input[type='number'] {
 }
 
 .canvas-wrap canvas {
-  width: 100%;
-  height: 100%;
   display: block;
 }
 
@@ -344,17 +376,29 @@ input[type='number'] {
 
 /* ---- deck ----------------------------------------------------------------- */
 
-.deck {
-  flex: none;
+/*
+ * The bottom bar.
+ *
+ * Transport at the left where the hand goes, the legend pushed to the right so
+ * the two never compete, and a single row that does not reflow — a bar that
+ * changes height as the legend wraps would move the play button under the
+ * pointer, which is the one thing it must never do.
+ */
+.bottombar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 var(--pad);
   border-top: 1px solid var(--line);
-  padding: 10px var(--pad);
+  background: var(--surface);
+  overflow: hidden;
 }
 
 .transport {
   display: flex;
   align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
 }
 
 .speed {
@@ -536,17 +580,63 @@ input[type='checkbox']:checked::after {
   transform: translateY(-1px) rotate(45deg);
 }
 
-/* ---- analysis drawer ------------------------------------------------------ */
+/* ---- analysis sheet ------------------------------------------------------- */
 
-.drawer-bar {
+/*
+ * The analysis sheet.
+ *
+ * Everything in it is something you read rather than watch, so it comes over
+ * the top of the cabin instead of squeezing it — the simulation keeps running
+ * underneath and is one keypress away. It stops short of both bars so the
+ * transport stays live while you read, which is the whole reason it is a sheet
+ * and not a page.
+ */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgb(6 8 10 / 62%);
+  animation: fade-in 0.14s ease;
+}
+
+.scrim[hidden] {
+  display: none;
+}
+
+.sheet {
+  position: fixed;
+  z-index: 31;
+  top: calc(var(--nav-h) + 14px);
+  bottom: calc(var(--bar-h) + 14px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1080px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 55%);
+  animation: sheet-in 0.16s ease;
+}
+
+.sheet[hidden] {
+  display: none;
+}
+
+.sheet-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 16px;
-  border-top: 1px solid var(--line);
-  padding-right: var(--pad);
+  padding: 0 var(--pad);
+  height: 46px;
+  border-bottom: 1px solid var(--line);
 }
 
-/* One control for how hard every panel in the drawer looks. */
+/* One control for how hard every panel in the sheet looks. Pushed right, so
+ * the title stays the leftmost thing and Close the rightmost. */
 .precision {
   display: flex;
   align-items: center;
@@ -584,34 +674,38 @@ input[type='checkbox']:checked::after {
   color: var(--ink);
 }
 
-.drawer-handle {
-  appearance: none;
+.sheet-head h2 {
+  margin: 0;
+  font-size: var(--t-base);
+  font-weight: var(--w-semibold);
+  letter-spacing: 0.02em;
+}
+
+/* The sheet scrolls, not the page behind it. */
+.sheet .views {
   flex: 1;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  color: var(--dim);
-  font-size: var(--t-small);
-  padding: 9px var(--pad);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  background: transparent;
-  border: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
-.drawer-handle:hover {
-  color: var(--ink);
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
 }
 
-.drawer-caret {
-  font-size: var(--t-micro);
-  transition: transform 0.12s ease;
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
 }
 
-.drawer-handle[aria-expanded='true'] .drawer-caret {
-  transform: rotate(180deg);
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .sheet {
+    animation: none;
+  }
 }
 
 .tabs {
@@ -732,11 +826,11 @@ input[type='checkbox']:checked::after {
 
 .inspector {
   position: fixed;
-  /* Clears the topbar so its own toggle stays reachable. */
-  top: 46px;
+  /* Sits between the two bars, so both stay reachable while it is open. */
+  top: var(--nav-h);
   right: 0;
-  bottom: 0;
-  width: 320px;
+  bottom: var(--bar-h);
+  width: 340px;
   background: var(--surface);
   border-left: 1px solid var(--line);
   overflow-y: auto;

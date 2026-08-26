@@ -20,6 +20,8 @@
           </label>
           <span class="versus" aria-hidden="true">vs</span>
           <select id="opponent" aria-label="Race against"></select>
+          <span class="topbar-rule" aria-hidden="true"></span>
+          <button id="analysis-toggle" class="btn" aria-expanded="false">Analysis</button>
           <button id="pin" class="btn">Pin run</button>
           <button id="inspector-toggle" class="btn btn-icon" aria-expanded="false">
             Configure
@@ -27,42 +29,50 @@
         </div>
       </header>
 
-      <main class="frame">
-      <section class="viewport">
-        <div class="lanes" id="lanes"></div>
-        <p class="verdict" id="verdict" hidden></p>
-      </section>
+      <main class="stage">
+        <section class="viewport">
+          <div class="lanes" id="lanes"></div>
+          <p class="verdict" id="verdict" hidden></p>
+          <p class="note strategy-note" id="strategy-note"></p>
+        </section>
+      </main>
 
-      <div class="deck">
+      <footer class="bottombar">
         <div class="transport">
           <button id="play" class="btn btn-play">Play</button>
           <button id="step" class="btn">Step</button>
           <button id="reset" class="btn">Reset</button>
-          <label class="speed">
-            <input id="speed" type="range" min="1" max="60" step="1" value="12" />
-            <output id="speed-value">12×</output>
-          </label>
-          <ul class="legend">
-            <li><i data-key="walking"></i>walking</li>
-            <li><i data-key="blocked"></i>blocked</li>
-            <li><i data-key="stowing"></i>stowing</li>
-            <li><i data-key="shuffling"></i>shuffle</li>
-            <li><i data-key="seated"></i>seated</li>
-            <li><i data-key="aisleChair"></i>aisle chair</li>
-            <li><i data-key="crew"></i>assist crew</li>
-          </ul>
-          <p class="keyhint"><kbd>space</kbd><kbd>r</kbd><kbd>←→</kbd></p>
         </div>
-        <p class="note strategy-note" id="strategy-note"></p>
-      </div>
+        <label class="speed">
+          <input id="speed" type="range" min="1" max="60" step="1" value="12" />
+          <output id="speed-value">12×</output>
+        </label>
+        <ul class="legend">
+          <li><i data-key="walking"></i>walking</li>
+          <li><i data-key="blocked"></i>blocked</li>
+          <li><i data-key="stowing"></i>stowing</li>
+          <li><i data-key="shuffling"></i>shuffle</li>
+          <li><i data-key="seated"></i>seated</li>
+          <li><i data-key="aisleChair"></i>aisle chair</li>
+          <li><i data-key="crew"></i>assist crew</li>
+        </ul>
+        <p class="keyhint"><kbd>space</kbd><kbd>r</kbd><kbd>←→</kbd></p>
+      </footer>
 
-        <div class="drawer-bar">
-          <button class="drawer-handle" id="drawer-handle" aria-expanded="false">
-            <span>Analysis</span>
-            <span class="drawer-caret">▾</span>
-          </button>
-          <div class="precision" id="precision" hidden></div>
-        </div>
+      <div class="scrim" id="analysis-scrim" hidden></div>
+      <section
+        class="sheet"
+        id="analysis"
+        hidden
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="analysis-title"
+      >
+        <header class="sheet-head">
+          <h2 id="analysis-title">Analysis</h2>
+          <div class="precision" id="precision"></div>
+          <button id="analysis-close" class="btn btn-quiet">Close</button>
+        </header>
 
         <nav class="tabs" id="tabs" role="tablist">
           <button role="tab" data-tab="this-run" class="tab">This run</button>
@@ -219,8 +229,9 @@
             <div class="block" id="research"></div>
           </section>
         </div>
+      </section>
 
-        <aside class="inspector" id="inspector" hidden>
+      <aside class="inspector" id="inspector" hidden>
           <div class="inspector-head">
             <h2>Configuration</h2>
             <button id="inspector-close" class="btn btn-quiet">Close</button>
@@ -230,8 +241,7 @@
             <div class="presets" id="presets"></div>
           </section>
           <div id="controls"></div>
-        </aside>
-      </main>
+      </aside>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

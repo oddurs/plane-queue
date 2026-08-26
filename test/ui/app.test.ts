@@ -201,6 +201,8 @@ describe('the bench', () => {
 describe('the tabs', () => {
   it('shows one view at a time and switches on click', async () => {
     const app = await launch();
+    // The tabs live inside the analysis sheet now, so it has to be open.
+    app.click(app.$('#analysis-toggle'));
     const tabs = app.all<HTMLButtonElement>('#tabs [data-tab]');
     expect(tabs.length).toBeGreaterThan(1);
     for (const tab of tabs) {

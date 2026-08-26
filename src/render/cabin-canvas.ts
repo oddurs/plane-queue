@@ -138,6 +138,31 @@ export function requiredWidth(cabin: Cabin): number {
   return Math.ceil(drawnLengthM(cabin) * MIN_SCALE + 24);
 }
 
+/**
+ * Canvas height the drawing needs at a given width.
+ *
+ * `layout` centres the aircraft in whatever height it is handed and hangs the
+ * wings, the row numbers and the jetbridge lane below it, so the frame cannot
+ * simply be told to fill its container: too tall and the aeroplane floats in a
+ * void with its own statistics a screen away, too short and `queueY` hits its
+ * `height - 6` clamp and rides up into the row numbers. The drawing knows how
+ * much room it wants, so it says.
+ *
+ * Only the cabin band scales with the width; everything under it is fixed. With
+ * `d` as half the slack, `layout` puts the band at `originY = d - 14` and the
+ * queue at `bottom + wingSpan + 64`, and clamps that to `height - 6`. Asking
+ * for no clamping at the widest the wings are ever drawn:
+ *
+ *     cabinH + 2d - 6  >=  (d - 14) + cabinH + 54 + 64
+ *                    d  >=  110
+ *
+ * which is the 220 below.
+ */
+export function requiredHeight(cabin: Cabin, width: number): number {
+  const scale = (width - 24) / drawnLengthM(cabin);
+  return Math.ceil(cabin.type.cabinWidthM * scale + 220);
+}
+
 function layout(cabin: Cabin, width: number, height: number): Layout {
   const t = cabin.type;
   const rows = cabin.config.rows;
@@ -251,12 +276,15 @@ export class CabinRenderer {
    * Sizes the backing store to the element's CSS box at device resolution.
    *
    * The canvas takes whichever is larger of its frame and the width the cabin
-   * needs to stay legible; when that exceeds the frame the wrapper scrolls.
+   * needs to stay legible; when that exceeds the frame the wrapper scrolls. Its
+   * height then follows from that width, so the drawing is exactly as tall as
+   * it needs to be and the lane stays one block rather than two ends of a gap.
    */
   resize(cabin: Cabin): void {
     const frame = this.canvas.parentElement?.clientWidth ?? 0;
     const width = Math.max(frame, requiredWidth(cabin));
     this.canvas.style.width = `${width}px`;
+    this.canvas.style.height = `${requiredHeight(cabin, width)}px`;
 
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();

@@ -455,6 +455,12 @@ document.addEventListener('keydown', (event) => {
     $('speed-value').textContent = `${speed}×`;
   };
 
+  if (event.key === 'Escape') {
+    if (!$('analysis').hidden) setAnalysis(false);
+    else if (!$('inspector').hidden) setInspector(false);
+    return;
+  }
+
   switch (event.key) {
     case ' ':
       event.preventDefault();
@@ -970,11 +976,12 @@ const tabs = createTabs($('tabs'), $('views'), (name) => {
   refreshActiveView();
 });
 
-// ---- drawers ---------------------------------------------------------------
+// ---- overlays --------------------------------------------------------------
 
 /**
- * Configuration is a drawer, not a permanent rail. Simulation software gives
- * the viewport the room and keeps its settings a click away.
+ * Configuration is a panel, not a permanent rail. It sits between the two bars
+ * so the transport stays live while it is open, and the cabin re-measures into
+ * whatever width is left.
  */
 function setInspector(open: boolean): void {
   $('inspector').hidden = !open;
@@ -991,24 +998,29 @@ $('inspector-toggle').addEventListener('click', () =>
 );
 $('inspector-close').addEventListener('click', () => setInspector(false));
 
-/** Analysis sits under a handle so it never competes with the simulation. */
-function setDrawer(open: boolean): void {
-  $('drawer-handle').setAttribute('aria-expanded', String(open));
-  $('tabs').hidden = !open;
-  $('views').hidden = !open;
-  $('precision').hidden = !open;
-  document.getElementById('app')?.classList.toggle('analysis-open', open);
-  // The viewport resizes either way, so the canvas must re-measure.
+/**
+ * Analysis comes over the top of the cabin rather than beside or below it.
+ *
+ * Everything in it is read rather than watched, and it wants the width; the
+ * simulation carries on underneath and the transport stays reachable, so
+ * closing it is never more than a keypress.
+ */
+function setAnalysis(open: boolean): void {
+  $('analysis').hidden = !open;
+  $('analysis-scrim').hidden = !open;
+  $('analysis-toggle').setAttribute('aria-expanded', String(open));
+  if (!open) return;
+
+  // Charts size themselves from their container, which measures zero while the
+  // sheet is hidden — so they are painted after it has been given a box.
   requestAnimationFrame(() => {
-    lanes.forEach((l) => l.resize());
-    draw(true);
-    if (open) tabs.show(tabs.active || 'this-run');
+    tabs.show(tabs.active || 'this-run');
   });
 }
 
-$('drawer-handle').addEventListener('click', () =>
-  setDrawer($('drawer-handle').getAttribute('aria-expanded') !== 'true'),
-);
+$('analysis-toggle').addEventListener('click', () => setAnalysis($('analysis').hidden));
+$('analysis-close').addEventListener('click', () => setAnalysis(false));
+$('analysis-scrim').addEventListener('click', () => setAnalysis(false));
 
 buildPresets();
 buildPrecision();
@@ -1023,9 +1035,9 @@ paintLegend();
 rebuildLanes();
 paintMasthead();
 tabs.show('this-run');
-// Analysis starts folded away: the simulation is the interface, and the panels
-// under it are there when they are wanted.
-setDrawer(false);
+// Both overlays start shut: the simulation is the interface, and the panels
+// over it are there when they are wanted.
+setAnalysis(false);
 setInspector(false);
 
 // The plane is already boarding when you arrive. This is a simulator first —
