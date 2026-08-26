@@ -9,6 +9,7 @@ const wait = (over: Partial<PassengerWait> = {}): PassengerWait => ({
   maxDepth: 2,
   partyId: null,
   needsAssistance: false,
+  assistance: 'none',
   seconds: 0,
   blocked: 0,
   ...over,

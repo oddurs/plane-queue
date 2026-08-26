@@ -135,6 +135,10 @@ export class Lane {
     // Unit in the label, number in the value — a two-word value wraps badly in
     // a narrow lane.
     this.setStat('delay', String(Math.round(m.totalBlockedSeconds / 60)));
+    this.setStat('transfers', String(m.crewTransfers));
+    // What the aircraft waits for after the last passenger is down: the crew
+    // who carried somebody aboard still have to get back off it.
+    this.setStat('crewhold', formatDuration(m.crewClearSeconds));
   }
 
   private setStat(key: string, value: string): void {
@@ -153,6 +157,8 @@ export class Lane {
       ['wait', 'Med. wait'],
       // Short enough to survive a half-width lane without an ellipsis.
       ['delay', 'Delay min'],
+      ['transfers', 'Transfers'],
+      ['crewhold', 'Crew hold'],
     ];
     this.statsEl.replaceChildren();
     this.statCells.clear();

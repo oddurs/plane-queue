@@ -158,10 +158,16 @@ export function computeEquity(waits: PassengerWait[], rows: number): Equity {
       band('Middle', atDepth((w) => w.depth > 0 && w.depth < w.maxDepth)),
       band('Aisle', atDepth((w) => w.depth === 0)),
     ],
+    // Assistance is split out by kind rather than lumped together: a passenger
+    // with a cane and one being lifted out of an aisle chair are having very
+    // different mornings, and averaging them hides the one worth seeing.
     byCohort: [
       band('Alone', atDepth((w) => w.partyId === null && !w.needsAssistance)),
       band('In a party', atDepth((w) => w.partyId !== null && !w.needsAssistance)),
-      band('Needs assistance', atDepth((w) => w.needsAssistance)),
+      band('Aisle chair', atDepth((w) => w.assistance === 'aisle-chair')),
+      band('Own chair to door', atDepth((w) => w.assistance === 'own-wheelchair')),
+      band('Reduced mobility', atDepth((w) => w.assistance === 'reduced-mobility')),
+      band('Escorted minor', atDepth((w) => w.assistance === 'minor')),
     ].filter((b) => b.count > 0),
     median: at(0.5),
     p90: at(0.9),
