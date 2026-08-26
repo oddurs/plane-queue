@@ -1,7 +1,8 @@
 import { STRATEGIES, naturalGroups } from '../engine/strategies.ts';
 import { AIRCRAFT_TYPES } from '../engine/aircraft.ts';
 import type { Scenario } from '../engine/run.ts';
-import type { StrategyId } from '../engine/types.ts';
+import { ASSISTANCE_KINDS, type AssistanceKind, type StrategyId } from '../engine/types.ts';
+import { DEFAULT_ASSISTANCE_MIX } from '../engine/passengers.ts';
 
 /**
  * The settings panel. Plain DOM built from a small declarative spec — every
@@ -124,6 +125,54 @@ const PASSENGERS: SliderSpec[] = [
     format: (v) => (v === 0 ? 'everyone alike' : `±${Math.round(v * 100)}%`),
     hint: 'Spread of individual walking pace. Changes who is quick and who dawdles without changing the average.',
   },
+];
+
+/** What each kind of assistance is called, and what it costs the aisle. */
+const ASSISTANCE_LABELS: Record<Exclude<AssistanceKind, 'none'>, { name: string; hint: string }> = {
+  'aisle-chair': {
+    name: 'Aisle chair',
+    hint: 'Carried to the seat by crew, who then walk back out through everyone still boarding. The only kind that puts extra people in the aisle.',
+  },
+  'own-wheelchair': {
+    name: 'Own chair to the door',
+    hint: 'Transfers at the aircraft door and walks or is steadied to the seat. No crew aboard.',
+  },
+  'reduced-mobility': {
+    name: 'Reduced mobility',
+    hint: 'Cane, walker, or simply slow on their feet. Preboards and boards unaided.',
+  },
+  minor: {
+    name: 'Escorted minor',
+    hint: 'Unaccompanied minor or an adult with an infant in arms.',
+  },
+};
+
+/**
+ * How the assisted share of the cabin divides between the four kinds.
+ *
+ * Relative weights rather than percentages that must sum to one, so dragging
+ * one does not silently pull the others about. The readout shows the share each
+ * weight currently works out to, which is the number anyone actually wants.
+ */
+const ASSISTANCE_MIX: SliderSpec[] = ASSISTANCE_KINDS.map((kind) => ({
+  label: ASSISTANCE_LABELS[kind].name,
+  applies: (s: Scenario) => s.population.assistanceFraction > 0,
+  min: 0,
+  max: 10,
+  step: 1,
+  get: (s: Scenario) => (s.population.assistanceMix ?? DEFAULT_ASSISTANCE_MIX)[kind],
+  set: (s: Scenario, v: number) => {
+    s.population.assistanceMix = {
+      ...(s.population.assistanceMix ?? DEFAULT_ASSISTANCE_MIX),
+      [kind]: v,
+    };
+  },
+  format: () => '',
+  hint: ASSISTANCE_LABELS[kind].hint,
+}));
+
+/** The crew side of it: how many people it takes to make the lift. */
+const ASSISTANCE_CREW: SliderSpec[] = [
   {
     label: 'Needing assistance',
     min: 0,
@@ -134,14 +183,49 @@ const PASSENGERS: SliderSpec[] = [
       s.population.assistanceFraction = v;
     },
     format: (v) => `${(v * 100).toFixed(1)}%`,
+    hint: 'Share of the cabin who ask for help boarding, of any kind.',
+  },
+  {
+    label: 'Crew per aisle chair',
+    applies: (s) => assistedCount(s, 'aisle-chair') > 0,
+    min: 1,
+    max: 3,
+    step: 1,
+    get: (s) => s.params.escortsPerAisleChair,
+    set: (s, v) => {
+      s.params = { ...s.params, escortsPerAisleChair: v };
+    },
+    format: (v) => String(v),
+    hint: 'Each of them walks back out against the boarding flow once the transfer is done.',
   },
 ];
+
+/**
+ * Roughly how many passengers a scenario will produce of one assistance kind.
+ *
+ * Only ever used to decide whether a control is worth drawing and what number
+ * to print beside it, so an expected value from the weights is enough — the
+ * actual manifest is drawn at random from the same distribution.
+ */
+export function assistedCount(s: Scenario, kind: Exclude<AssistanceKind, 'none'>): number {
+  const seats = s.cabin.rows * 6 - s.cabin.firstClassRows * 2;
+  const assisted = seats * s.population.loadFactor * s.population.assistanceFraction;
+  const mix = s.population.assistanceMix ?? DEFAULT_ASSISTANCE_MIX;
+  const total = ASSISTANCE_KINDS.reduce((sum, k) => sum + Math.max(0, mix[k]), 0);
+  if (total <= 0) return 0;
+  return Math.round((assisted * Math.max(0, mix[kind])) / total);
+}
 
 /**
  * Every continuous control the panel offers, so a test can sweep exactly the
  * range a user can reach rather than a hand-copied approximation of it.
  */
-export const CONTROL_SPECS: SliderSpec[] = [...AIRCRAFT, ...PASSENGERS];
+export const CONTROL_SPECS: SliderSpec[] = [
+  ...AIRCRAFT,
+  ...PASSENGERS,
+  ...ASSISTANCE_CREW,
+  ...ASSISTANCE_MIX,
+];
 
 /** The discrete controls, likewise. */
 export const GATE_RANGES = {
@@ -155,13 +239,59 @@ function sliders(
   scenario: Scenario,
   onChange: Change,
   syncs: Sync[],
+  /** Overrides the value readout, for controls whose number is a consequence. */
+  readout?: (spec: SliderSpec) => string,
 ): HTMLElement[] {
   return specs
     .filter((spec) => spec.applies?.(scenario) ?? true)
-    .map((spec) => slider(spec, scenario, onChange, syncs));
+    .map((spec) => slider(spec, scenario, onChange, syncs, readout));
 }
 
-function slider(spec: SliderSpec, scenario: Scenario, onChange: Change, syncs: Sync[]): HTMLElement {
+/**
+ * Says what the weights below it are weights *of*, and how many people that is.
+ *
+ * A relative weight means nothing on its own; the number worth reading is how
+ * many passengers it works out to, and that moves whenever the load factor or
+ * the assisted share does.
+ */
+function mixHeading(scenario: Scenario, syncs: Sync[]): HTMLElement {
+  const hint = document.createElement('small');
+  hint.className = 'hint';
+  const paint = (): void => {
+    const total = ASSISTANCE_KINDS.reduce((sum, k) => sum + assistedCount(scenario, k), 0);
+    hint.textContent =
+      total === 0
+        ? 'Nobody aboard is asking for help.'
+        : `How those ${total} passengers divide. Relative weights — the share beside each is what it works out to.`;
+  };
+  paint();
+  syncs.push(paint);
+  return hint;
+}
+
+/**
+ * `3 · 40%` — the headcount this weight produces, and its share of the assisted.
+ *
+ * The share comes from the weights rather than from the rounded headcounts:
+ * with only three assisted passengers aboard, every non-zero kind rounds to one
+ * person, and a share derived from those would report an even split however the
+ * sliders were actually set.
+ */
+function shareLabel(scenario: Scenario, kind: Exclude<AssistanceKind, 'none'>): string {
+  const mix = scenario.population.assistanceMix ?? DEFAULT_ASSISTANCE_MIX;
+  const weight = Math.max(0, mix[kind]);
+  const total = ASSISTANCE_KINDS.reduce((sum, k) => sum + Math.max(0, mix[k]), 0);
+  if (total === 0) return '0';
+  return `${assistedCount(scenario, kind)} · ${Math.round((weight / total) * 100)}%`;
+}
+
+function slider(
+  spec: SliderSpec,
+  scenario: Scenario,
+  onChange: Change,
+  syncs: Sync[],
+  readout?: (spec: SliderSpec) => string,
+): HTMLElement {
   const wrap = document.createElement('label');
   wrap.className = 'field';
 
@@ -170,7 +300,8 @@ function slider(spec: SliderSpec, scenario: Scenario, onChange: Change, syncs: S
   const name = document.createElement('span');
   name.textContent = spec.label;
   const value = document.createElement('output');
-  value.textContent = spec.format(spec.get(scenario));
+  const show = (v: number): string => readout?.(spec) ?? spec.format(v);
+  value.textContent = show(spec.get(scenario));
   head.append(name, value);
 
   const input = document.createElement('input');
@@ -181,8 +312,9 @@ function slider(spec: SliderSpec, scenario: Scenario, onChange: Change, syncs: S
   input.value = String(spec.get(scenario));
   input.addEventListener('input', () => {
     const v = Number(input.value);
-    value.textContent = spec.format(v);
     onChange((s) => spec.set(s, v));
+    // After the change, not before: a share is a consequence of the new value.
+    value.textContent = show(v);
   });
 
   // One control can move another — dragging Rows down clamps first-class rows.
@@ -190,7 +322,7 @@ function slider(spec: SliderSpec, scenario: Scenario, onChange: Change, syncs: S
   syncs.push(() => {
     const v = spec.get(scenario);
     input.value = String(v);
-    value.textContent = spec.format(v);
+    value.textContent = show(v);
   });
 
   wrap.append(head, input);
@@ -419,6 +551,18 @@ export function buildControls(
     ]),
   );
   host.append(section('Passengers', sliders(PASSENGERS, scenario, onChange, syncs)));
+
+  // Mobility assistance. Its own section because the aisle-chair case is not a
+  // slower passenger — it puts crew in the aisle who then have to get back out.
+  const assistance: HTMLElement[] = sliders(ASSISTANCE_CREW, scenario, onChange, syncs);
+  if (scenario.population.assistanceFraction > 0) {
+    assistance.push(mixHeading(scenario, syncs));
+    assistance.push(...sliders(ASSISTANCE_MIX, scenario, onChange, syncs, (spec) => {
+      const kind = ASSISTANCE_KINDS.find((k) => ASSISTANCE_LABELS[k].name === spec.label);
+      return kind ? shareLabel(scenario, kind) : '';
+    }));
+  }
+  host.append(section('Mobility assistance', assistance));
 
   // Seed.
   const seedField = document.createElement('label');

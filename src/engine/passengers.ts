@@ -1,4 +1,12 @@
-import type { Cabin, Passenger, PopulationConfig, Seat } from './types.ts';
+import {
+  ASSISTANCE_KINDS,
+  type AssistanceKind,
+  type AssistanceMix,
+  type Cabin,
+  type Passenger,
+  type PopulationConfig,
+  type Seat,
+} from './types.ts';
 import type { Rng } from './rng.ts';
 
 /**
@@ -145,7 +153,14 @@ function makePassenger(
   const draw = (): number => rng.binomial(MAX_BAGS, config.meanBags / MAX_BAGS);
   // Children rarely wrestle a roll-aboard into the bin themselves.
   const bags = isChild ? Math.min(1, draw()) : draw();
-  const needsAssistance = !isChild && rng.bool(config.assistanceFraction);
+  // Children travelling in a party are already accompanied, so the assisted
+  // draw is made among everyone else — which is also why an unaccompanied minor
+  // can come out of it.
+  const assistance =
+    isChild || !rng.bool(config.assistanceFraction)
+      ? 'none'
+      : pickAssistance(config.assistanceMix ?? DEFAULT_ASSISTANCE_MIX, rng);
+  const needsAssistance = assistance !== 'none';
 
   // Individual pace, then the effect of being a child on top. The assistance
   // penalty lives in SimParams so it stays tunable from the interface.
@@ -158,7 +173,36 @@ function makePassenger(
     bags,
     partyId,
     isChild,
+    assistance,
     needsAssistance,
     slowFactor,
   };
+}
+
+/**
+ * The default split of assisted passengers between the four kinds.
+ *
+ * Weighted so that the aisle-chair case — the only one that brings crew aboard
+ * — is the minority it is in practice. Most requests for assistance are for
+ * someone who walks aboard slowly, or who uses their own chair to the door.
+ */
+export const DEFAULT_ASSISTANCE_MIX: AssistanceMix = {
+  'aisle-chair': 1,
+  'own-wheelchair': 2,
+  'reduced-mobility': 4,
+  minor: 3,
+};
+
+/** Draws one kind from the mix, treating the entries as relative weights. */
+function pickAssistance(mix: AssistanceMix, rng: Rng): AssistanceKind {
+  const total = ASSISTANCE_KINDS.reduce((sum, kind) => sum + Math.max(0, mix[kind]), 0);
+  // A mix dragged to all-zero still has to produce somebody.
+  if (total <= 0) return 'reduced-mobility';
+
+  let roll = rng.next() * total;
+  for (const kind of ASSISTANCE_KINDS) {
+    roll -= Math.max(0, mix[kind]);
+    if (roll <= 0) return kind;
+  }
+  return ASSISTANCE_KINDS.at(-1) as AssistanceKind;
 }

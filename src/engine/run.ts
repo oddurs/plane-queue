@@ -1,5 +1,5 @@
 import { buildCabin } from './cabin.ts';
-import { generatePopulation } from './passengers.ts';
+import { DEFAULT_ASSISTANCE_MIX, generatePopulation } from './passengers.ts';
 import { orderWithGroups } from './strategies.ts';
 import { buildQueue } from './groups.ts';
 import { Simulation, DEFAULT_PARAMS } from './sim.ts';
@@ -27,6 +27,7 @@ export const DEFAULT_SCENARIO: Scenario = {
     meanBags: 1.0,
     partyFraction: 0.35,
     assistanceFraction: 0.02,
+    assistanceMix: DEFAULT_ASSISTANCE_MIX,
     childFraction: 0.35,
     speedSpread: 0.25,
   },
@@ -50,6 +51,10 @@ export const DEFAULT_SCENARIO: Scenario = {
  */
 export function createSimulation(scenario: Scenario): Simulation {
   const cabin = buildCabin(scenario.cabin);
+  // Scenarios are persisted — pinned to the bench, restored later — so one
+  // written before a parameter existed has to run under today's default for it
+  // rather than under `undefined`.
+  const params = { ...DEFAULT_PARAMS, ...scenario.params };
 
   const populationRng = new Rng(scenario.seed);
   const passengers = generatePopulation(cabin, scenario.population, populationRng);
@@ -70,7 +75,7 @@ export function createSimulation(scenario: Scenario): Simulation {
   const queue = buildQueue(ordered, scenario.boarding, orderRng);
 
   const simRng = new Rng(scenario.seed ^ 0x85ebca6b);
-  return new Simulation(cabin, queue, scenario.params, simRng);
+  return new Simulation(cabin, queue, params, simRng);
 }
 
 export function runScenario(scenario: Scenario) {

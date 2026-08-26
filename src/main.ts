@@ -6,7 +6,7 @@ import { PRESETS } from './engine/presets.ts';
 import { naturalGroups, pickOpponent, STRATEGIES, strategyName } from './engine/strategies.ts';
 import type { AnalysisResult } from './engine/insights.ts';
 import type { StrategyId } from './engine/types.ts';
-import { buildControls } from './ui/controls.ts';
+import { assistedCount, buildControls } from './ui/controls.ts';
 import {
   boardingCurve,
   comparisonChart,
@@ -287,6 +287,9 @@ function controlShape(s: Scenario): string {
     s.cabin.typeId ?? 'a320',
     s.population.partyFraction > 0,
     s.population.assistanceFraction > 0,
+    // Turning the aisle-chair share up brings a control with it, so the shape
+    // has to notice — a panel that only syncs values would never draw it.
+    assistedCount(s, 'aisle-chair') > 0,
   ].join('|');
 }
 

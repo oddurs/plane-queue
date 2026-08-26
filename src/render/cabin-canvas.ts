@@ -50,6 +50,9 @@ const COLORS = {
   blocked: '#6b7280',
   text: '#5c626a',
   textBright: '#e6e8ea',
+  crew: '#b98cff',
+  crewLeaving: '#e0b3ff',
+  aisleChair: '#2dd4bf',
 } as const;
 
 /** Categorical series palette, saturated enough to hold up on near-black. */
@@ -615,6 +618,67 @@ export class CabinRenderer {
         ctx.globalAlpha = 1;
       }
     }
+
+    this.drawCrew(l, snapshot, r);
+  }
+
+  /**
+   * The assistance crew, drawn offset from the aisle centre line.
+   *
+   * They share a cell with whoever they are passing — that is the whole point
+   * of the outbound lane — so drawing them on the centre line would put two
+   * figures on top of each other. The offset is the visual form of "somebody
+   * pressed into a row to let them by", and the direction they face is the
+   * direction they are walking, which is the thing worth seeing: on the way in
+   * they move with the queue, on the way out straight against it.
+   */
+  private drawCrew(l: Layout, snapshot: SimSnapshot, r: number): void {
+    const { ctx } = this;
+
+    for (const member of snapshot.crew) {
+      if (member.pos < 0) continue;
+
+      const target = aisleX(l, member.pos);
+      let x = target;
+      const moving = member.state === 'escorting' || member.state === 'leaving';
+      if (moving && member.stepDuration > 0 && member.fromPos >= 0) {
+        const from = aisleX(l, member.fromPos);
+        const progress = Math.min(1, Math.max(0, 1 - member.timer / member.stepDuration));
+        x = from + (target - from) * progress;
+      }
+
+      // Offset only once they are actually in the outbound lane; an escort who
+      // has turned round but not yet found a gap is still in the queue's way,
+      // and should be drawn standing in it.
+      const outbound = member.lane === 'exit';
+      const y = l.aisleY + (outbound ? -r * 0.85 : r * 0.85);
+      const color = member.state === 'leaving' ? COLORS.crewLeaving : COLORS.crew;
+
+      // A plain disc with a heading tick: crew are not passengers and should
+      // not be counted as one at a glance.
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, r * 0.72, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (r > 3) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + member.heading * r * 1.25, y);
+        ctx.stroke();
+      }
+
+      if (member.state === 'transferring' && r > 3) {
+        // Mid-lift: a held ring, so a stalled aisle has a visible cause.
+        ctx.strokeStyle = COLORS.aisleChair;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(x, y, r * 1.15, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
   }
 
   /** A shoulders-and-head figure, with a bag while one is still being carried. */
@@ -674,6 +738,11 @@ export class CabinRenderer {
   }
 
   private agentColor(agent: AgentState): string {
+    // An aisle chair keeps its own colour throughout: it is the thing on screen
+    // whose progress explains everybody else's.
+    if (agent.passenger.assistance === 'aisle-chair' && agent.state !== 'seated') {
+      return agent.blocked ? COLORS.blocked : COLORS.aisleChair;
+    }
     switch (agent.state) {
       case 'stowing':
         return COLORS.stowing;
@@ -810,6 +879,8 @@ export const STATE_COLORS: Record<string, string> = {
   stowing: COLORS.stowing,
   shuffling: COLORS.shuffling,
   seated: COLORS.seatTaken,
+  aisleChair: COLORS.aisleChair,
+  crew: COLORS.crew,
 };
 
 export { COLORS, GROUP_COLORS };

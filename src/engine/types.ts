@@ -69,6 +69,50 @@ export interface Cabin {
   rowPitchM: number[];
 }
 
+/**
+ * The kinds of boarding assistance an airline actually distinguishes.
+ *
+ * They are not interchangeable, and the difference is not politeness — it is
+ * how much of the aisle each one occupies and for how long. A passenger with a
+ * cane preboards and walks aboard slowly. A passenger who uses an aisle chair
+ * is carried aboard by crew who then have to walk back out against the boarding
+ * flow, which is the single most disruptive thing that happens in a jetbridge
+ * and was previously modelled as "a bit slower".
+ */
+export type AssistanceKind =
+  /** No assistance requested. */
+  | 'none'
+  /**
+   * Transferred to a narrow aisle chair at the door and taken to the seat by
+   * crew, who lift the passenger across and then leave the aircraft.
+   */
+  | 'aisle-chair'
+  /**
+   * Uses their own wheelchair as far as the aircraft door, then walks or is
+   * steadied to the seat. No aisle chair, no lift, no crew walking back out.
+   */
+  | 'own-wheelchair'
+  /** Cane, walker, or simply slow on their feet. Preboards; boards unaided. */
+  | 'reduced-mobility'
+  /** Unaccompanied minor or an adult with an infant in arms, escorted by crew. */
+  | 'minor';
+
+/** Every assistance kind that is not `none`, in the order the UI lists them. */
+export const ASSISTANCE_KINDS: Exclude<AssistanceKind, 'none'>[] = [
+  'aisle-chair',
+  'own-wheelchair',
+  'reduced-mobility',
+  'minor',
+];
+
+/**
+ * How the assisted share of a cabin divides between the kinds.
+ *
+ * Held as relative weights rather than fractions that must sum to one, so a
+ * slider can be dragged without silently rescaling its neighbours.
+ */
+export type AssistanceMix = Record<Exclude<AssistanceKind, 'none'>, number>;
+
 export interface Passenger {
   id: number;
   seat: Seat;
@@ -77,6 +121,9 @@ export interface Passenger {
   /** Members of a travelling party share a partyId; solo travellers get null. */
   partyId: number | null;
   isChild: boolean;
+  /** What kind of help this passenger boards with, if any. */
+  assistance: AssistanceKind;
+  /** `assistance !== 'none'`, kept as a field because so much code asks it. */
   needsAssistance: boolean;
   /** Multiplier on walking and seating time; >1 is slower. */
   slowFactor: number;
@@ -112,8 +159,42 @@ export interface SimParams {
   adjacentStowPenalty: number;
   /** How far from their seat a passenger will hunt for overhead space. */
   binSearchRadius: number;
-  /** Walk/seat time multiplier for passengers needing assistance. */
+  /**
+   * Walk/seat time multiplier for a passenger who boards on their own feet with
+   * help — a cane, a walker, or their own wheelchair as far as the door.
+   */
   assistanceSlowFactor: number;
+  /** Walk time multiplier for an aisle chair being pushed down the aisle. */
+  aisleChairSlowFactor: number;
+  /** Walk/seat time multiplier for an escorted minor. */
+  minorSlowFactor: number;
+  /**
+   * Seconds a passenger arriving in their own wheelchair spends at the door,
+   * getting out of it before walking to the seat.
+   *
+   * It happens in the doorway, so it holds up the whole queue behind them —
+   * which is what makes it a different thing from simply walking slowly, and
+   * the reason the two are worth telling apart at all.
+   */
+  doorTransferTime: Triangular;
+  /** Crew who board with each aisle-chair passenger and leave once seated. */
+  escortsPerAisleChair: number;
+  /**
+   * Seconds to lift a passenger from the aisle chair into the seat.
+   *
+   * Far longer than sitting down unaided, and it blocks the aisle cell beside
+   * the row plus the cells the crew are standing in for the whole of it.
+   */
+  aisleChairTransferTime: Triangular;
+  /**
+   * Seconds lost by each of a boarding passenger and a departing crew member
+   * when they squeeze past one another in the aisle.
+   *
+   * They do get past — an aisle is not quite single file if one person presses
+   * into a row — but both are delayed, and that delay is the real cost of
+   * sending crew back out through an incoming stream.
+   */
+  crewPassTime: number;
   /** Seconds to drop into a seat once the way is clear. */
   baseSeatingTime: number;
   /** Extra seconds seating a child. */
@@ -145,6 +226,13 @@ export interface PopulationConfig {
   partyFraction: number;
   /** Fraction of passengers needing assistance boarding. */
   assistanceFraction: number;
+  /**
+   * How that fraction divides between the kinds of assistance.
+   *
+   * Optional because scenarios are persisted — a run pinned to the bench before
+   * this existed still has to restore and re-run. Absent means the default mix.
+   */
+  assistanceMix?: AssistanceMix;
   /** Fraction of party members that are children. */
   childFraction: number;
   /**
@@ -201,20 +289,76 @@ export type PassengerState =
   | 'seated';
 
 /** Live per-passenger simulation state, kept parallel to the Passenger list. */
-export interface AgentState {
-  passenger: Passenger;
-  state: PassengerState;
+/**
+ * Anything standing in an aisle cell.
+ *
+ * The aisle used to hold passengers only and ran strictly one way. Crew who
+ * bring an aisle chair aboard have to walk back out through people still
+ * boarding, so a cell can now hold either, moving either way.
+ */
+export interface AisleOccupant {
   /** Aisle cell: 0 = doorway, 1..rows = alongside that row. -1 = not aboard. */
   pos: number;
   /**
-   * Cell this agent is stepping out of, and how long the step takes. The
-   * renderer interpolates between the two so passengers glide rather than
+   * Cell this occupant is stepping out of, and how long the step takes. The
+   * renderer interpolates between the two so people glide rather than
    * teleporting from row to row.
    */
   fromPos: number;
   stepDuration: number;
   /** Countdown to the next action, in seconds. */
   timer: number;
+  /** True while this occupant is held up by someone in the way. */
+  blocked: boolean;
+}
+
+/** Where a crew escort is up to. */
+export type CrewState =
+  /** At the door, waiting to follow their passenger aboard. */
+  | 'waiting'
+  /** Walking aft behind the aisle chair. */
+  | 'escorting'
+  /** Standing by the row while the passenger is lifted into the seat. */
+  | 'transferring'
+  /** Walking forward to the door, against the boarding flow. */
+  | 'leaving'
+  /** Off the aircraft. */
+  | 'ashore';
+
+/**
+ * A crew member escorting an aisle-chair passenger.
+ *
+ * They are not passengers: they have no seat, they never appear in the manifest
+ * or the equity figures, and boarding is not finished until they are back off
+ * the aircraft.
+ */
+export interface CrewMember extends AisleOccupant {
+  kind: 'crew';
+  id: number;
+  /** Passenger id this escort is aboard for. */
+  clientId: number;
+  state: CrewState;
+  /** +1 walking aft to the seat, -1 walking forward to the door. */
+  heading: 1 | -1;
+  /**
+   * Which lane they are standing in.
+   *
+   * Turning round and crossing into the outbound lane are two different things:
+   * an escort whose colleague is already walking out through the same stretch
+   * of aisle has to wait its turn, and until it does it is still in everybody's
+   * way in the boarding stream.
+   */
+  lane: 'aisle' | 'exit';
+  /** Aisle cell this escort works from during the transfer. */
+  station: number;
+  /** Seconds spent aboard, door to door. */
+  aboardTime: number;
+}
+
+export interface AgentState extends AisleOccupant {
+  kind: 'passenger';
+  passenger: Passenger;
+  state: PassengerState;
   /** Queue index; determines boarding order. */
   order: number;
   /** Release group index, for colouring and gating. */
@@ -223,8 +367,6 @@ export interface AgentState {
   aisleTime: number;
   /** Seconds spent standing still because someone ahead was in the way. */
   blockedTime: number;
-  /** True while this agent is blocked behind someone. */
-  blocked: boolean;
   /** Rows travelled from the seat row to find overhead space. */
   binOffset: number;
   /** Bags taken at the gate, so never stowed in the cabin. */
@@ -255,6 +397,8 @@ export interface PassengerWait {
   maxDepth: number;
   partyId: number | null;
   needsAssistance: boolean;
+  /** Which kind of help, so the equity bands can separate them. */
+  assistance: AssistanceKind;
   /** Seconds aboard but not yet seated: transit plus imposed delay. */
   seconds: number;
   /**
@@ -299,6 +443,23 @@ export interface Metrics {
   binSearches: number;
   /** Bags taken at the gate because the cabin could not hold them. */
   gateChecked: number;
+  /** How many passengers boarded with each kind of assistance. */
+  assistanceCounts: Record<AssistanceKind, number>;
+  /** Crew-seconds spent aboard escorting aisle-chair passengers, door to door. */
+  crewAboardSeconds: number;
+  /** Aisle-chair transfers performed. */
+  crewTransfers: number;
+  /**
+   * Times a departing crew member and a boarding passenger squeezed past each
+   * other. The cost of sending crew back out through an incoming stream, which
+   * is invisible in any model where the aisle only runs one way.
+   */
+  crewPassEvents: number;
+  /**
+   * Simulated seconds from the last passenger sitting down to the last crew
+   * member stepping off. Boarding is not finished until the aisle is empty.
+   */
+  crewClearSeconds: number;
   /** Seconds each passenger spent standing in the aisle. */
   aisleTimes: number[];
   /** The same waits, attributed to who endured them. */
