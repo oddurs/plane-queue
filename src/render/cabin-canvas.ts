@@ -133,6 +133,11 @@ function drawnLengthM(cabin: Cabin): number {
   return t.noseM + t.forwardService.lengthM + cabinM + t.aftService.lengthM + t.tailM;
 }
 
+/** Station of the door passengers board through, in metres from the nose. */
+function boardingDoorM(cabin: Cabin): number | null {
+  return cabin.type.doors.find((d) => d.id === '1L')?.stationM ?? null;
+}
+
 /** Canvas width needed to draw this cabin at the minimum legible scale. */
 export function requiredWidth(cabin: Cabin): number {
   return Math.ceil(drawnLengthM(cabin) * MIN_SCALE + 24);
@@ -160,7 +165,23 @@ export function requiredWidth(cabin: Cabin): number {
  */
 export function requiredHeight(cabin: Cabin, width: number): number {
   const scale = (width - 24) / drawnLengthM(cabin);
-  return Math.ceil(cabin.type.cabinWidthM * scale + 220);
+  // The gate sits above the aircraft and has to clear the wings, which reach
+  // `wingSpan` up from the cabin band. Every pixel of clearance costs two of
+  // height, because the aeroplane is centred in whatever it is given.
+  const gate = showsGate(width) ? 52 : 0;
+  return Math.ceil(cabin.type.cabinWidthM * scale + 220 + gate);
+}
+
+
+
+/**
+ * Whether there is width to draw the gate rather than a strip of dots.
+ *
+ * Two cabins racing get half the frame each, and a lounge squeezed into that is
+ * worse than the bar it replaces — so below this they keep the compact strip.
+ */
+function showsGate(width: number): boolean {
+  return width >= 880;
 }
 
 function layout(cabin: Cabin, width: number, height: number): Layout {
@@ -946,44 +967,151 @@ export class CabinRenderer {
    * back-to-front queue is a clean gradient, Steffen's alternates, and random
    * boarding is noise.
    */
+  /**
+   * The gate, the airbridge, and everybody still on the wrong side of the door.
+   *
+   * The simulation models the gate as an order and a set of release groups; it
+   * has no notion of where anybody is standing before they reach the doorway.
+   * So nothing here is a simulated position. What is drawn is queue order —
+   * place in the line, which is real — laid along a bridge and a lounge, and
+   * the release group each passenger belongs to, which is the whole subject of
+   * the strategies and was until now invisible outside a slider.
+   *
+   * Nobody on the bridge moves under their own steam. They are the next few in
+   * the queue, drawn where they stand in it; when the person at the door boards
+   * everyone behind is one place further forward, which is exactly what the
+   * queue did.
+   */
   private drawQueue(l: Layout, cabin: Cabin, snapshot: SimSnapshot): void {
-    const { ctx } = this;
     const waiting = snapshot.agents
       .filter((a) => a.state === 'queued')
       .sort((a, b) => a.order - b.order);
 
+    if (showsGate(l.tailX)) this.drawGate(l, cabin, waiting, snapshot.total);
+    else this.drawQueueStrip(l, cabin, waiting);
+  }
+
+  /** The full drawing: lounge, desk, bridge, door. */
+  private drawGate(
+    l: Layout,
+    cabin: Cabin,
+    waiting: AgentState[],
+    total: number,
+  ): void {
+    const { ctx } = this;
+
+    // Above the aircraft, because that is the side door 1L is on. The band fits
+    // in the clearance `layout` already leaves over the cabin, so showing the
+    // gate costs no height at all.
+    const doorX = l.noseX + (boardingDoorM(cabin) ?? 0) * l.scale;
+    // Clear of the wings: a terminal drawn over a wing root reads as a mistake
+    // about what is on top of what.
+    const bottom = l.top - l.wingSpan - 8;
+    const top = bottom - 44;
+    const y = (top + bottom) / 2;
+
+    const cell = 6;
+    // The lounge holds the whole manifest, so it starts full and visibly
+    // empties. Sizing it to whoever is left would shrink the room as the flight
+    // boards, which is not a thing rooms do.
+    const rows = Math.max(1, Math.floor((bottom - top - 8) / cell));
+    const cols = Math.max(8, Math.ceil(total / rows));
+    const bridgeRun = 104;
+    const loungeX0 = doorX + bridgeRun;
+    const loungeX1 = Math.min(l.tailX, loungeX0 + cols * cell + 12);
+
+    // Airbridge: a corridor from the desk to the door, and the throat where it
+    // meets the aircraft.
+    ctx.fillStyle = COLORS.service;
+    ctx.fillRect(doorX, y - 8, loungeX0 - doorX, 16);
+    ctx.strokeStyle = COLORS.hullSoft;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(doorX + 0.5, y - 7.5, loungeX0 - doorX - 1, 15);
+    ctx.beginPath();
+    ctx.moveTo(doorX + 0.5, y + 8);
+    ctx.lineTo(doorX + 0.5, l.top);
+    ctx.stroke();
+
+    // The lounge, and the desk where the group is called.
+    ctx.fillStyle = COLORS.fuselage;
+    ctx.fillRect(loungeX0, top, loungeX1 - loungeX0, bottom - top);
+    ctx.strokeRect(loungeX0 + 0.5, top + 0.5, loungeX1 - loungeX0 - 1, bottom - top - 1);
+    ctx.fillStyle = COLORS.serviceHatch;
+    ctx.fillRect(loungeX0 - 4, y - 11, 4, 22);
+
+    const colours = groupPalette(waiting);
+
+    // On the bridge: the next few, single file, nearest the door first.
+    const onBridge = Math.min(waiting.length, Math.floor((bridgeRun - 20) / 11));
+    for (let i = 0; i < onBridge; i++) {
+      const agent = waiting[i] as AgentState;
+      ctx.fillStyle = colours(agent, cabin);
+      ctx.beginPath();
+      ctx.arc(doorX + 13 + i * 11, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // In the lounge: everyone else, in queue order, wrapped into rows.
+    const rest = waiting.slice(onBridge);
+    const shown = Math.min(rest.length, cols * rows);
+    for (let i = 0; i < shown; i++) {
+      const agent = rest[i] as AgentState;
+      ctx.fillStyle = colours(agent, cabin);
+      ctx.fillRect(
+        loungeX0 + 6 + (i % cols) * cell,
+        top + 4 + Math.floor(i / cols) * cell,
+        cell - 1.6,
+        cell - 1.6,
+      );
+    }
+
+    ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = COLORS.text;
+    ctx.fillText('airbridge', doorX + 1, top - 6);
+    const next = waiting[0];
+    ctx.fillText(
+      next
+        ? `gate \u00b7 ${waiting.length} waiting \u00b7 calling group ${next.group + 1}`
+        : 'gate \u00b7 everyone aboard',
+      loungeX0,
+      top - 6,
+    );
+
+    if (rest.length > shown) {
+      ctx.textAlign = 'right';
+      ctx.fillText(`+${rest.length - shown}`, loungeX1 - 4, top - 6);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  /** The compact form, for a frame too narrow to hold the gate. */
+  private drawQueueStrip(l: Layout, cabin: Cabin, waiting: AgentState[]): void {
+    const { ctx } = this;
+
     ctx.fillStyle = COLORS.text;
     ctx.font = canvasFont(TYPE.micro, WEIGHT.medium);
     ctx.textAlign = 'left';
-    ctx.fillText(
-      `jetbridge · ${waiting.length} waiting`,
-      l.noseX,
-      l.queueY - 11,
-    );
+    ctx.fillText(`gate \u00b7 ${waiting.length} waiting`, l.noseX, l.queueY - 11);
 
     if (waiting.length === 0) return;
 
-    const laneX0 = l.noseX;
-    const laneX1 = l.tailX;
+    const colours = groupPalette(waiting);
     const dot = 4;
-    const slots = Math.max(1, Math.floor((laneX1 - laneX0) / (dot + 2)));
-    // The head of the queue sits nearest the door, at the left.
+    const slots = Math.max(1, Math.floor((l.tailX - l.noseX) / (dot + 2)));
     const shown = waiting.slice(0, slots);
 
     for (let i = 0; i < shown.length; i++) {
       const agent = shown[i] as AgentState;
-      const x = laneX0 + i * (dot + 2);
-      const depth = (agent.passenger.seat.row - 1) / Math.max(1, cabin.config.rows - 1);
-      ctx.fillStyle = queueColor(depth);
-      ctx.fillRect(x, l.queueY - dot, dot, dot);
+      ctx.fillStyle = colours(agent, cabin);
+      ctx.fillRect(l.noseX + i * (dot + 2), l.queueY - dot, dot, dot);
     }
 
     if (waiting.length > shown.length) {
       ctx.fillStyle = COLORS.text;
-      ctx.textAlign = 'left';
       ctx.fillText(
         `+${waiting.length - shown.length}`,
-        laneX0 + shown.length * (dot + 2) + 4,
+        l.noseX + shown.length * (dot + 2) + 4,
         l.queueY,
       );
     }
@@ -991,6 +1119,29 @@ export class CabinRenderer {
 }
 
 /** Front of cabin (blue) through to the rear (orange). */
+/**
+ * How to colour the people still waiting.
+ *
+ * By release group when the gate uses a handful of them, because that is the
+ * thing the strategies actually set and the one place it can be seen: four
+ * blocks of colour in the lounge *is* back-to-front, and one block is random
+ * boarding whatever the picker says. A strictly ordered queue gives every
+ * passenger their own group, at which point the colours would be noise — so
+ * that falls back to seat position, which is what the queue is sorted by.
+ */
+function groupPalette(
+  waiting: AgentState[],
+): (agent: AgentState, cabin: Cabin) => string {
+  const groups = new Set(waiting.map((a) => a.group));
+  if (groups.size > GROUP_COLORS.length) {
+    return (agent, cabin) =>
+      queueColor((agent.passenger.seat.row - 1) / Math.max(1, cabin.config.rows - 1));
+  }
+  const order = [...groups].sort((a, b) => a - b);
+  return (agent) =>
+    GROUP_COLORS[order.indexOf(agent.group) % GROUP_COLORS.length] as string;
+}
+
 function queueColor(t: number): string {
   const k = Math.min(1, Math.max(0, t));
   return `rgb(${Math.round(91 + k * 164)},${Math.round(147 - k * 40)},${Math.round(240 - k * 187)})`;
