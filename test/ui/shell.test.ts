@@ -91,3 +91,26 @@ describe('the analysis sheet', () => {
     expect(app.$<HTMLElement>('#inspector').hidden).toBe(true);
   });
 });
+
+describe('steering the cutaway', () => {
+  it('takes a pointer on the map without complaint', async () => {
+    // The canvas has no layout in a DOM test, so this pins the wiring rather
+    // than the arithmetic — the mapping itself is covered by `overviewHeight`.
+    const app = await launch();
+    const canvas = app.$<HTMLCanvasElement>('canvas');
+    const fire = (type: string, y: number, buttons = 0) =>
+      canvas.dispatchEvent(
+        new PointerEvent(type, { clientX: 200, clientY: y, buttons, bubbles: true }),
+      );
+
+    expect(() => {
+      fire('pointermove', 4);
+      fire('pointerdown', 4);
+      fire('pointermove', 40, 1);
+      fire('pointermove', 400);
+      fire('pointerdown', 400);
+    }).not.toThrow();
+    // And the run is untouched by looking at it.
+    expect(app.stat('Seated')).toMatch(/^\d+\/\d+$/);
+  });
+});
