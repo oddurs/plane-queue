@@ -3,7 +3,7 @@ import { createSimulation, type Scenario } from '../engine/run.ts';
 import { strategyName } from '../engine/strategies.ts';
 import type { Simulation } from '../engine/sim.ts';
 import type { Cabin, Metrics, StrategyId } from '../engine/types.ts';
-import { CabinRenderer } from '../render/cabin-canvas.ts';
+import { CabinRenderer, overviewHeight } from '../render/cabin-canvas.ts';
 import { formatDuration } from '../engine/stats.ts';
 
 /**
@@ -60,6 +60,7 @@ export class Lane {
     this.root.append(head, wrap);
     this.buildStats();
     this.renderer = new CabinRenderer(this.canvas);
+    this.watchSteering();
     this.rebuild(scenario, strategy);
   }
 
@@ -73,6 +74,42 @@ export class Lane {
     this.finishTime = null;
     this.alive = true;
     this.nameEl.textContent = strategyName(strategy);
+  }
+
+  /**
+   * The strip along the top is a map, so it can be pointed at.
+   *
+   * Dragging along it walks the cutaway down the cabin; the pointer changes
+   * over the strip so that this is findable without being told. Below the
+   * strip nothing is clickable, and the cursor says so.
+   */
+  private watchSteering(): void {
+    const at = (event: PointerEvent): { x: number; overview: boolean } => {
+      const rect = this.canvas.getBoundingClientRect();
+      return {
+        x: event.clientX - rect.left,
+        overview: event.clientY - rect.top <= overviewHeight(rect.height),
+      };
+    };
+
+    // Repainted here rather than waiting for the clock: a paused simulation
+    // draws no frames, and looking somewhere else should work while paused.
+    const steer = (x: number): void => {
+      this.renderer.steerTo(x);
+      this.draw();
+    };
+
+    this.canvas.addEventListener('pointerdown', (event) => {
+      const { x, overview } = at(event);
+      if (overview) steer(x);
+    });
+
+    this.canvas.addEventListener('pointermove', (event) => {
+      const { x, overview } = at(event);
+      this.canvas.style.cursor = overview ? 'ew-resize' : 'default';
+      // Held down: drag the view along rather than making one click per row.
+      if (overview && event.buttons > 0) steer(x);
+    });
   }
 
   /** True while this lane still has ticks left to run. */

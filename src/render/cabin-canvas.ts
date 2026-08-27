@@ -331,10 +331,24 @@ function cutawayScale(cabin: Cabin, width: number): number {
   return Math.min(CUTAWAY_MAX_PXM, (width - 24) / (CUTAWAY_MIN_ROWS * pitch));
 }
 
+/** Roughly four seconds at sixty frames, after which the camera resumes following. */
+const STEER_FRAMES = 240;
+
 /** Height given to the whole-aircraft strip, before the cutaway takes the rest. */
 const OVERVIEW_H = 164;
 /** How much of that strip the schematic fuselage itself occupies. */
 const OVERVIEW_BAND = 46;
+
+/**
+ * Height the overview strip gets in a canvas of this height.
+ *
+ * Exported because the pane split is the one thing outside the renderer needs
+ * to know: a click belongs to the strip or to the cutaway, and nothing else
+ * about the drawing has to be understood to say which.
+ */
+export function overviewHeight(canvasHeight: number): number {
+  return Math.min(OVERVIEW_H, Math.round(canvasHeight * 0.42));
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -346,6 +360,35 @@ export class CabinRenderer {
   private camX: number | null = null;
   /** Decayed congestion per aisle cell, for the wash along the floor. */
   private heat: Record<number, number> = {};
+  /** The last two layouts, so a point on the strip can be found in the cutaway. */
+  private lastOv: Layout | null = null;
+  private lastCu: Layout | null = null;
+  /** Where the viewer asked to look, and how many frames that request survives. */
+  private steered: number | null = null;
+  private steerHold = 0;
+
+  /**
+   * Look at the point of the aircraft under `x`, in canvas pixels on the strip.
+   *
+   * Steering wins over following for a few seconds and then hands back, rather
+   * than latching: the interesting part of a boarding moves aft on its own, and
+   * a view that stayed where it was put would need driving all the way down the
+   * cabin to keep up with it.
+   *
+   * It arrives immediately rather than easing. The easing is there so the
+   * automatic follow drifts instead of snapping about; somebody who has just
+   * pointed at a part of the aeroplane has said where they want to be, and a
+   * paused simulation would not draw the frames to carry them there anyway.
+   */
+  steerTo(x: number): void {
+    const ov = this.lastOv;
+    const cu = this.lastCu;
+    if (!ov || !cu) return;
+    const metres = (x - ov.noseX) / ov.scale;
+    this.steered = cu.noseX + metres * cu.scale;
+    this.camX = this.steered;
+    this.steerHold = STEER_FRAMES;
+  }
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -403,11 +446,12 @@ export class CabinRenderer {
     ctx.fillStyle = COLORS.fuselage;
     ctx.fillRect(0, 0, w, h);
 
-    const overviewH = Math.min(OVERVIEW_H, Math.round(h * 0.42));
+    const overviewH = overviewHeight(h);
     const cutawayH = h - overviewH;
 
     // --- the whole aircraft, small -----------------------------------------
     const ov = layout(cabin, w, overviewH, { band: OVERVIEW_BAND });
+    this.lastOv = ov;
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, w, overviewH);
@@ -431,8 +475,13 @@ export class CabinRenderer {
 
     // --- a dozen rows of it, large ------------------------------------------
     const cu = layout(cabin, w, cutawayH, { inset: true, maxScale: cutawayScale(cabin, w) });
+    this.lastCu = cu;
     const centre = this.follow(snapshot, cu);
-    const pan = clamp(centre - w / 2, 0, Math.max(0, cu.tailX + 12 - w));
+    // Bounded by what the cutaway actually draws, which is the cabin and the
+    // service areas at each end — not the nose and tail cones, which belong to
+    // the hull and only the overview has one. Clamping to the tail tip let the
+    // view run off the end of the aeroplane into blank canvas.
+    const pan = clamp(centre - w / 2, cu.fwdX0 - 12, Math.max(cu.fwdX0 - 12, cu.aftX1 + 12 - w));
 
     ctx.save();
     ctx.beginPath();
@@ -464,12 +513,38 @@ export class CabinRenderer {
    * camera that jumped every time somebody sat down would be unwatchable.
    */
   private follow(snapshot: SimSnapshot, l: Layout): number {
-    const aboard = snapshot.agents.filter((a) => a.pos >= 0 && a.state !== 'seated');
-    const target = aboard.length
-      ? aisleX(l, aboard.reduce((sum, a) => sum + a.pos, 0) / aboard.length)
-      : aisleX(l, 1);
+    const target =
+      this.steerHold > 0 && this.steered !== null
+        ? ((this.steerHold--, this.steered) as number)
+        : this.interesting(snapshot, l);
     this.camX = this.camX === null ? target : this.camX + (target - this.camX) * 0.06;
     return this.camX;
+  }
+
+  /**
+   * The part of the cabin worth looking at.
+   *
+   * The middle of whoever is still on their feet, most of the time — it is the
+   * only stretch where anything is happening, and it walks aft on its own as
+   * the flight boards. But when the aisle is genuinely jammed somewhere, that
+   * is the thing to be looking at, and the mean would sit off to one side of it
+   * with the crowd. So a hot enough cell wins: the camera goes to the trouble.
+   */
+  private interesting(snapshot: SimSnapshot, l: Layout): number {
+    let hottest = 0;
+    let hotRow = 0;
+    for (const [row, heat] of Object.entries(this.heat)) {
+      if (heat > hottest) {
+        hottest = heat;
+        hotRow = Number(row);
+      }
+    }
+    if (hottest > 0.4 && hotRow > 0) return aisleX(l, hotRow);
+
+    const aboard = snapshot.agents.filter((a) => a.pos >= 0 && a.state !== 'seated');
+    return aboard.length
+      ? aisleX(l, aboard.reduce((sum, a) => sum + a.pos, 0) / aboard.length)
+      : aisleX(l, 1);
   }
 
   /** The cutaway's window, drawn on the overview so the two read as one thing. */

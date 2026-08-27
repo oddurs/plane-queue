@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildCabin } from '../src/engine/cabin.ts';
 import { AIRCRAFT_TYPES } from '../src/engine/aircraft.ts';
+import { overviewHeight } from '../src/render/cabin-canvas.ts';
 import { generatePopulation } from '../src/engine/passengers.ts';
 import { Rng } from '../src/engine/rng.ts';
 import { createSimulation, runScenario, DEFAULT_SCENARIO, type Scenario } from '../src/engine/run.ts';
@@ -148,4 +149,20 @@ describe('the gate drawing', () => {
     }
   });
 
+});
+
+describe('the two panes', () => {
+  it('splits the canvas so a click can be attributed to one of them', () => {
+    // The pane boundary is the only thing outside the renderer has to know: a
+    // point is on the map, which steers, or on the cutaway, which does not.
+    expect(overviewHeight(1000)).toBeLessThan(1000 / 2);
+    expect(overviewHeight(200)).toBe(Math.round(200 * 0.42));
+    // The strip never grows past its own ceiling, however tall the frame.
+    expect(overviewHeight(4000)).toBe(overviewHeight(2000));
+    // ...and never takes more than its share of a short one.
+    for (const h of [180, 300, 420, 900]) {
+      expect(overviewHeight(h), `h=${h}`).toBeLessThanOrEqual(Math.round(h * 0.42));
+      expect(overviewHeight(h), `h=${h}`).toBeGreaterThan(0);
+    }
+  });
 });
