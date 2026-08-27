@@ -50,6 +50,11 @@ const COLORS = {
   blocked: '#6b7280',
   text: '#5c626a',
   textBright: '#e6e8ea',
+  cabinFloor: '#181c21',
+  seatedBody: '#525d69',
+  sidewall: '#242a32',
+  window: '#0a0c0f',
+  heat: '#ff5f56',
   crew: '#b98cff',
   crewLeaving: '#e0b3ff',
   aisleChair: '#2dd4bf',
@@ -165,6 +170,15 @@ function showsGate(width: number): boolean {
 interface LayoutOptions {
   inset?: boolean;
   /**
+   * Ceiling on pixels per metre.
+   *
+   * A cutaway takes its scale from the height it is given, and a tall window
+   * gives it a great deal — enough to draw a seat a hundred pixels wide and fit
+   * eight rows on a 2000-pixel screen, which is not a cabin, it is furniture.
+   * Past a point more magnification buys nothing and costs context.
+   */
+  maxScale?: number;
+  /**
    * Draw the cabin as a band of this many pixels rather than to its true beam.
    *
    * The overview is a schematic, not a scale drawing: it has one job, which is
@@ -191,8 +205,14 @@ function layout(
 
   const byWidth = (width - margin * 2) / totalM;
   // Keep the true beam: the cabin band must also fit the height available.
-  const byHeight = (height - (opts.inset ? 30 : 104)) / t.cabinWidthM;
-  const scale = opts.inset ? byHeight : opts.band ? byWidth : Math.min(byWidth, byHeight);
+  // The cutaway hangs bins above the cabin and row numbers below it, so it
+  // keeps a margin rather than filling the frame edge to edge.
+  const byHeight = (height - (opts.inset ? 64 : 104)) / t.cabinWidthM;
+  const scale = opts.inset
+    ? Math.min(byHeight, opts.maxScale ?? Infinity)
+    : opts.band
+      ? byWidth
+      : Math.min(byWidth, byHeight);
 
   // Cross section, to scale: sidewall clearance, three seats, the aisle, three
   // seats, sidewall clearance. On the A320 that is 0.43 m seats and a 0.64 m
@@ -295,6 +315,22 @@ function aisleX(l: Layout, pos: number): number {
   return (l.rowX[i] ?? l.cabinX1) + (l.rowW[i] ?? 10) / 2;
 }
 
+/**
+ * The most the cutaway will magnify, and the least of the cabin it will show.
+ *
+ * Enough that a passenger is around forty pixels and everything drawn on them
+ * reads; not so much that a seat becomes a slab and a dozen rows becomes eight.
+ * The row floor matters more on a narrow frame, where two cabins are racing.
+ */
+const CUTAWAY_MAX_PXM = 98;
+const CUTAWAY_MIN_ROWS = 11;
+
+function cutawayScale(cabin: Cabin, width: number): number {
+  const pitch =
+    cabin.rowPitchM.reduce((sum, p) => sum + p, 0) / Math.max(1, cabin.rowPitchM.length);
+  return Math.min(CUTAWAY_MAX_PXM, (width - 24) / (CUTAWAY_MIN_ROWS * pitch));
+}
+
 /** Height given to the whole-aircraft strip, before the cutaway takes the rest. */
 const OVERVIEW_H = 164;
 /** How much of that strip the schematic fuselage itself occupies. */
@@ -308,6 +344,8 @@ export class CabinRenderer {
   private ctx: CanvasRenderingContext2D;
   /** Eased camera centre for the cutaway, in its own pixel space. */
   private camX: number | null = null;
+  /** Decayed congestion per aisle cell, for the wash along the floor. */
+  private heat: Record<number, number> = {};
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -374,21 +412,25 @@ export class CabinRenderer {
     ctx.beginPath();
     ctx.rect(0, 0, w, overviewH);
     ctx.clip();
+    this.stirHeat(snapshot);
+
     this.drawWings(ov, cabin);
     this.drawHull(ov);
     this.drawService(ov, cabin);
     this.drawSeats(ov, cabin, occupied);
     this.drawSeated(ov, cabin, occupied);
+    this.drawHeat(ov, cabin);
     this.drawExits(ov, cabin);
     this.drawAgents(ov, cabin, snapshot);
     this.drawDoors(ov, cabin);
+    this.drawTypeName(ov, cabin);
     this.drawQueue(ov, cabin, snapshot);
     ctx.restore();
 
     if (cutawayH < 120) return;
 
     // --- a dozen rows of it, large ------------------------------------------
-    const cu = layout(cabin, w, cutawayH, { inset: true });
+    const cu = layout(cabin, w, cutawayH, { inset: true, maxScale: cutawayScale(cabin, w) });
     const centre = this.follow(snapshot, cu);
     const pan = clamp(centre - w / 2, 0, Math.max(0, cu.tailX + 12 - w));
 
@@ -397,6 +439,7 @@ export class CabinRenderer {
     ctx.rect(0, overviewH, w, cutawayH);
     ctx.clip();
     ctx.translate(-pan, overviewH);
+    this.drawShell(cu, cabin);
     this.drawService(cu, cabin);
     this.drawBins(cu, cabin, binSlots);
     this.drawAisle(cu, cabin);
@@ -410,7 +453,6 @@ export class CabinRenderer {
 
     // Where the cutaway is looking, marked on the strip above it.
     this.drawViewport(ov, cu, pan, w, overviewH);
-    this.drawScale(cu, cabin, overviewH + cutawayH - 10, pan);
   }
 
   /**
@@ -648,10 +690,110 @@ export class CabinRenderer {
     }
   }
 
+  /**
+   * The room the seats are in: floor, sidewalls, and the line where the wall
+   * meets the ceiling bins.
+   *
+   * The overview draws a whole aeroplane and gets its solidity from the hull.
+   * The cutaway has no hull in frame, so without this the seats and the lockers
+   * float on the page with a gap between them that reads as a drawing mistake
+   * rather than as the wall of an aircraft.
+   */
+  private drawShell(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const x0 = l.fwdX0;
+    const x1 = l.aftX1;
+
+    // Floor, a shade up from the outside so the interior reads as lit.
+    ctx.fillStyle = COLORS.cabinFloor;
+    ctx.fillRect(x0, l.top, x1 - x0, l.cabinH);
+
+    // Sidewalls: the curve of the fuselage, falling off toward the windows.
+    const wall = Math.max(2, (l.cabinH - l.seatH * 6 - l.gap) / 2);
+    for (const [y, dir] of [
+      [l.top, 1],
+      [l.bottom - wall, -1],
+    ] as [number, number][]) {
+      const grad = ctx.createLinearGradient(0, y, 0, y + wall);
+      const [a, b] = dir > 0 ? [COLORS.sidewall, COLORS.cabinFloor] : [COLORS.cabinFloor, COLORS.sidewall];
+      grad.addColorStop(0, a);
+      grad.addColorStop(1, b);
+      ctx.fillStyle = grad;
+      ctx.fillRect(x0, y, x1 - x0, wall);
+    }
+
+    // Windows, one per row, where the wall meets the outside.
+    if (l.rowW[0] !== undefined && l.rowW[0] > 12) {
+      ctx.fillStyle = COLORS.window;
+      for (let row = 1; row <= cabin.config.rows; row++) {
+        const x = l.rowX[row - 1];
+        const w = l.rowW[row - 1];
+        if (x === undefined || w === undefined) continue;
+        const ww = Math.min(9, w * 0.22);
+        for (const y of [l.top + 1.5, l.bottom - 1.5 - 3]) {
+          ctx.fillRect(x + w / 2 - ww / 2, y, ww, 3);
+        }
+      }
+    }
+  }
+
+  /**
+   * Where the aisle is jamming, washed onto the floor of it.
+   *
+   * This app's whole argument is that a boarding strategy is a claim about
+   * where people end up standing still, and until now that claim lived in a
+   * heatmap behind a tab. Here it is on the aisle itself: heat accumulates
+   * under anybody who cannot move and bleeds away when they can, so a queue
+   * backing up behind somebody at the bins stains the floor behind them and
+   * the stain fades from the front as it clears.
+   *
+   * It is a decayed average of `blocked`, which the simulation sets; the
+   * renderer holds the decay because it is a property of the picture, not of
+   * the model, and the model already reports the same thing as a number.
+   *
+   * Drawn on both panes, so the strip says where in the aeroplane to look and
+   * the cutaway shows what it is like to be there.
+   */
+  private drawHeat(l: Layout, cabin: Cabin): void {
+    const { ctx } = this;
+    const rows = cabin.config.rows;
+    ctx.save();
+    for (let row = 1; row <= rows; row++) {
+      const heat = this.heat[row] ?? 0;
+      if (heat < 0.02) continue;
+      const x = l.rowX[row - 1];
+      const w = l.rowW[row - 1];
+      if (x === undefined || w === undefined) continue;
+      // Strongest along the centre of the aisle and fading to the seat rows,
+      // so it reads as a stain on the floor rather than a painted block.
+      const grad = ctx.createLinearGradient(0, l.aisleY - l.gap / 2, 0, l.aisleY + l.gap / 2);
+      grad.addColorStop(0, 'rgba(255,95,86,0)');
+      grad.addColorStop(0.5, COLORS.heat);
+      grad.addColorStop(1, 'rgba(255,95,86,0)');
+      ctx.globalAlpha = Math.min(0.22, heat * 0.22);
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, l.aisleY - l.gap / 2, w + 1, l.gap);
+    }
+    ctx.restore();
+  }
+
+  /** Advances the heat one frame: up where people are stuck, down everywhere. */
+  private stirHeat(snapshot: SimSnapshot): void {
+    for (const key of Object.keys(this.heat)) {
+      const i = Number(key);
+      this.heat[i] = (this.heat[i] as number) * 0.97;
+    }
+    for (const agent of snapshot.agents) {
+      if (!agent.blocked || agent.pos < 1) continue;
+      this.heat[agent.pos] = Math.min(1, (this.heat[agent.pos] ?? 0) + 0.05);
+    }
+  }
+
   private drawAisle(l: Layout, cabin: Cabin): void {
     const { ctx } = this;
     ctx.fillStyle = COLORS.aisle;
     ctx.fillRect(l.fwdX0, l.aisleY - l.gap / 2, l.aftX1 - l.fwdX0, l.gap);
+    this.drawHeat(l, cabin);
     ctx.strokeStyle = COLORS.serviceHatch;
     ctx.lineWidth = 1;
     for (const dy of [-l.gap / 2, l.gap / 2]) {
@@ -675,17 +817,22 @@ export class CabinRenderer {
         : seat.cabinClass === 'first'
           ? COLORS.firstClass
           : COLORS.seatEmpty;
-      ctx.fillRect(x, y, w, h);
+      // Rounded once there is room for the corner to be seen at all.
+      const round = Math.min(3.5, w * 0.09, h * 0.09);
+      roundRect(ctx, x, y, w, h, round);
+      ctx.fill();
 
       // A seat back on the forward edge, so seats read as seats.
       if (w > 7) {
         ctx.fillStyle = taken ? COLORS.seatTakenBack : COLORS.seatBack;
-        ctx.fillRect(x, y, Math.max(2, w * 0.22), h);
+        roundRect(ctx, x, y, Math.max(2, w * 0.22), h, round);
+        ctx.fill();
       }
 
       ctx.strokeStyle = COLORS.seatEdge;
       ctx.lineWidth = 1;
-      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, round);
+      ctx.stroke();
     }
   }
 
@@ -726,7 +873,8 @@ export class CabinRenderer {
     for (let row = 1; row <= cabin.config.rows; row++) {
       if (row % step !== 0 && row !== 1) continue;
       const x = (l.rowX[row - 1] ?? 0) + (l.rowW[row - 1] ?? 0) / 2;
-      ctx.fillText(String(row), x, l.bottom + l.wingSpan + 12);
+      // Clear of the lower bins, which hang just under the cabin band.
+      ctx.fillText(String(row), x, l.bottom + l.wingSpan + 12 + (l.wingSpan === 0 ? 12 : 0));
     }
   }
 
@@ -991,15 +1139,35 @@ export class CabinRenderer {
   }
 
   /** Seated passengers, so a filled cabin reads as people rather than blocks. */
+  /**
+   * Somebody in a seat, facing forward.
+   *
+   * A dot is enough at overview scale and much too little in the cutaway, where
+   * a seat is seventy pixels across and a passenger who has sat down should
+   * still look like the person who just walked up the aisle: shoulders across
+   * the seat, head toward the front of the aircraft.
+   */
   private drawSeated(l: Layout, cabin: Cabin, occupied: ReadonlySet<string>): void {
     const { ctx } = this;
     for (const seat of cabin.seats) {
       if (!occupied.has(`${seat.row}:${seat.letter}`)) continue;
       const [x, y, w, h] = seatRect(l, seat, maxDepth(cabin, seat.row));
       if (w < 6 || h < 6) continue;
+
+      const r = Math.min(w, h) * 0.3;
+      const cx = x + w * 0.58;
+      const cy = y + h / 2;
+
+      if (r > 4) {
+        // Shoulders, then the head in front of them.
+        ctx.fillStyle = COLORS.seatedBody;
+        ctx.beginPath();
+        ctx.ellipse(cx - r * 0.3, cy, r * 0.62, r * 0.95, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.fillStyle = COLORS.head;
       ctx.beginPath();
-      ctx.arc(x + w * 0.62, y + h / 2, Math.min(w, h) * 0.2, 0, Math.PI * 2);
+      ctx.arc(cx + (r > 4 ? r * 0.5 : 0), cy, r > 4 ? r * 0.78 : r, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -1057,29 +1225,21 @@ export class CabinRenderer {
   }
 
   /** A scale bar, because a drawing claiming to be to scale should show it. */
-  private drawScale(l: Layout, cabin: Cabin, baseline: number, pan: number): void {
+  /**
+   * What aircraft this is, by the nose of the overview.
+   *
+   * There used to be a five-metre ruler beside it. Two panes at two scales made
+   * it a liability — drawn outside the cutaway's transform it landed wherever
+   * the camera happened to be panned to — and it had stopped earning its place
+   * anyway: the strip shows the whole aeroplane and the cutaway numbers every
+   * row, which is the scale anybody actually reads.
+   */
+  private drawTypeName(l: Layout, cabin: Cabin): void {
     const { ctx } = this;
-    const metres = 5;
-    const w = metres * l.scale;
-    if (w < 24 || w > 400) return;
-    // Anchored to the pane, not the drawing, because the drawing pans under it.
-    const x = pan + 12;
-    const y = baseline;
-
-    ctx.strokeStyle = COLORS.text;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, y - 3);
-    ctx.lineTo(x, y);
-    ctx.lineTo(x + w, y);
-    ctx.lineTo(x + w, y - 3);
-    ctx.stroke();
-
     ctx.fillStyle = COLORS.text;
     ctx.font = canvasFont(TYPE.micro);
     ctx.textAlign = 'left';
-    ctx.fillText(`${metres} m`, x + w + 6, y + 2);
-    ctx.fillText(cabin.type.name, x + w + 44, y + 2);
+    ctx.fillText(cabin.type.name, l.noseX + 2, l.bottom + 22);
   }
 
   /**
@@ -1255,6 +1415,25 @@ function groupPalette(
   const order = [...groups].sort((a, b) => a - b);
   return (agent) =>
     GROUP_COLORS[order.indexOf(agent.group) % GROUP_COLORS.length] as string;
+}
+
+/** A rounded rectangle path, for surfaces that are meant to look upholstered. */
+function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const k = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + k, y);
+  ctx.arcTo(x + w, y, x + w, y + h, k);
+  ctx.arcTo(x + w, y + h, x, y + h, k);
+  ctx.arcTo(x, y + h, x, y, k);
+  ctx.arcTo(x, y, x + w, y, k);
+  ctx.closePath();
 }
 
 function queueColor(t: number): string {
